@@ -493,6 +493,12 @@ impl MvpAgent {
             todo_gate: self.cfg.borrow().todo_gate,
             remote_settings: self.cfg.borrow().remote_settings.clone(),
             laziness_debug_log: self.cfg.borrow().laziness_debug_log.clone(),
+            blackboard_path: {
+                let sessions = self.sessions.borrow();
+                sessions
+                    .get(&parent_sid)
+                    .and_then(|h| h.tool_context.blackboard_path.clone())
+            },
             backend_tools_enabled: self.cfg.borrow().resolve_backend_tools().value,
             respect_gitignore: self.cfg.borrow().respect_gitignore,
             path_not_found_hints: self.cfg.borrow().path_not_found_hints,

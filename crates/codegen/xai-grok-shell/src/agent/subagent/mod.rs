@@ -272,6 +272,9 @@ pub(crate) struct SubagentSpawnContext {
     /// Subagent classifier fires append to the same log file. `None`
     /// when the parent did not enable debug mode.
     pub laziness_debug_log: Option<std::path::PathBuf>,
+    /// Shared team blackboard of the session tree, inherited verbatim from
+    /// the parent so every descendant posts to the root session's board.
+    pub blackboard_path: Option<std::path::PathBuf>,
     pub backend_tools_enabled: bool,
     /// Whether tools should respect `.gitignore` patterns.
     /// Inherited from the parent session.

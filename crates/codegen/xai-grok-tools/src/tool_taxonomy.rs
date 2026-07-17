@@ -68,6 +68,8 @@ impl ToolKind {
             ToolKind::UseTool => "Use Tool",
             ToolKind::Monitor => "Monitor",
             ToolKind::GoalUpdate => "Update Goal",
+            ToolKind::BoardRead => "Read Blackboard",
+            ToolKind::BoardPost => "Post to Blackboard",
             ToolKind::Other => "Tool",
         }
     }
@@ -88,6 +90,7 @@ impl ToolKind {
             | ToolKind::WebFetch
             | ToolKind::EnterPlan
             | ToolKind::ExitPlan
+            | ToolKind::BoardRead
             | ToolKind::AskUser => true,
             ToolKind::Edit
             | ToolKind::Delete
@@ -109,6 +112,7 @@ impl ToolKind {
             | ToolKind::UseTool
             | ToolKind::Monitor
             | ToolKind::GoalUpdate
+            | ToolKind::BoardPost
             | ToolKind::Other => false,
         }
     }

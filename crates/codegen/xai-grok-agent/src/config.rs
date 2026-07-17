@@ -280,6 +280,8 @@ fn default_grok_build_toolset() -> ToolServerConfig {
             (&search_tool::SearchTool).into(),
             (&use_tool::UseTool).into(),
             (&grok_build::UpdateGoalTool).into(),
+            (&grok_build::BoardReadTool).into(),
+            (&grok_build::BoardPostTool).into(),
         ],
         behavior_preset: None,
     }
@@ -329,6 +331,8 @@ pub fn grok_build_hashline_toolset(
         (&search_tool::SearchTool).into(),
         (&use_tool::UseTool).into(),
         (&grok_build::UpdateGoalTool).into(),
+        (&grok_build::BoardReadTool).into(),
+        (&grok_build::BoardPostTool).into(),
     ]);
     ToolServerConfig {
         tools,
@@ -365,6 +369,11 @@ fn explore_toolset() -> ToolServerConfig {
             (&grok_build::ReadFileTool).into(),
             (&grok_build::ListDirTool).into(),
             (&grok_build::GrepTool).into(),
+            // Blackboard access writes to the shared board, not the
+            // workspace — explore agents stay read-only on files while
+            // still sharing their findings with the team.
+            (&grok_build::BoardReadTool).into(),
+            (&grok_build::BoardPostTool).into(),
         ],
         behavior_preset: None,
     }
@@ -381,6 +390,8 @@ fn plan_toolset() -> ToolServerConfig {
             (&grok_build::ListDirTool).into(),
             (&grok_build::GrepTool).into(),
             (&grok_build::TodoWriteTool).into(),
+            (&grok_build::BoardReadTool).into(),
+            (&grok_build::BoardPostTool).into(),
         ],
         behavior_preset: None,
     }
@@ -413,6 +424,8 @@ fn grok_build_plan_toolset() -> ToolServerConfig {
             (&grok_build::EnterPlanModeTool).into(),
             (&grok_build::ExitPlanModeTool).into(),
             (&grok_build::AskUserQuestionTool).into(),
+            (&grok_build::BoardReadTool).into(),
+            (&grok_build::BoardPostTool).into(),
         ],
         behavior_preset: None,
     }
@@ -452,6 +465,8 @@ fn orchestrator_toolset() -> ToolServerConfig {
             (&grok_build::ReferenceToVideoTool).into(),
             (&memory::MemorySearchImpl).into(),
             (&memory::MemoryGetImpl).into(),
+            (&grok_build::BoardReadTool).into(),
+            (&grok_build::BoardPostTool).into(),
         ],
         behavior_preset: None,
     }
@@ -482,6 +497,8 @@ fn grok_build_plan_no_subagents_toolset() -> ToolServerConfig {
             (&grok_build::EnterPlanModeTool).into(),
             (&grok_build::ExitPlanModeTool).into(),
             (&grok_build::AskUserQuestionTool).into(),
+            (&grok_build::BoardReadTool).into(),
+            (&grok_build::BoardPostTool).into(),
         ],
         behavior_preset: None,
     }
@@ -511,6 +528,8 @@ fn grok_build_ask_user_toolset() -> ToolServerConfig {
             (&use_tool::UseTool).into(),
             (&grok_build::UpdateGoalTool).into(),
             (&grok_build::AskUserQuestionTool).into(),
+            (&grok_build::BoardReadTool).into(),
+            (&grok_build::BoardPostTool).into(),
         ],
         behavior_preset: None,
     }

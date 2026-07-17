@@ -1,0 +1,5 @@
+# Byte-exact files: the template staleness test XOR-compares these against
+# pre-encrypted bytes, and bin/protoc is a dotslash script executed on
+# Unix — both break if autocrlf rewrites them to CRLF on Windows checkouts.
+crates/codegen/xai-grok-agent/templates/*.md text eol=lf
+bin/protoc text eol=lf

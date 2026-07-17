@@ -133,6 +133,12 @@ pub struct AgentBuilder {
     /// When set, `build()` uses these directly instead of running
     /// `list_skills_with_plugins()`.
     preloaded_skills: Option<Vec<xai_grok_tools::implementations::skills::types::SkillInfo>>,
+    /// Path of the shared team blackboard. `None` derives
+    /// `<session_folder>/blackboard.jsonl` — subagents override this with
+    /// the parent's path so the whole session tree shares one board.
+    blackboard_path: Option<PathBuf>,
+    /// Author name stamped on this agent's blackboard entries.
+    blackboard_author: Option<String>,
 }
 /// Ensure plan mode tools (`enter_plan_mode`, `exit_plan_mode`,
 /// `ask_user_question`) are present in the tool config.
@@ -238,7 +244,21 @@ impl AgentBuilder {
             system_reminder_tag: xai_grok_tools::reminders::DEFAULT_REMINDER_TAG,
             persisted_announced_skill_names: None,
             preloaded_skills: None,
+            blackboard_path: None,
+            blackboard_author: None,
         }
+    }
+    /// Override the shared blackboard file. Subagents pass the parent's
+    /// path so the whole session tree posts to (and reads from) one board.
+    pub fn with_blackboard_path(mut self, path: Option<PathBuf>) -> Self {
+        self.blackboard_path = path;
+        self
+    }
+    /// Author name stamped on this agent's blackboard entries
+    /// (e.g. `"main"` or `"explore#a1b2c3"`). Defaults to `"main"`.
+    pub fn with_blackboard_author(mut self, author: impl Into<String>) -> Self {
+        self.blackboard_author = Some(author.into());
+        self
     }
     /// Set persisted announced skill names for session resume.
     ///
@@ -1047,6 +1067,28 @@ impl AgentBuilder {
                     },
                 ),
             );
+        }
+        // Shared team blackboard: root sessions place the board in their
+        // session folder; subagents receive the parent's path via
+        // `with_blackboard_path` so the whole tree shares one ledger.
+        {
+            let toolset = tool_bridge.toolset();
+            let mut resources = toolset.resources.lock().await;
+            let board_path = self.blackboard_path.clone().unwrap_or_else(|| {
+                resources
+                    .get::<xai_grok_tools::types::resources::SessionFolder>()
+                    .map(|f| f.0.clone())
+                    .unwrap_or_else(std::env::temp_dir)
+                    .join("blackboard.jsonl")
+            });
+            let author = self
+                .blackboard_author
+                .clone()
+                .unwrap_or_else(|| "main".to_string());
+            resources.insert(xai_grok_tools::implementations::grok_build::BlackboardCfg {
+                path: board_path,
+                author,
+            });
         }
         if let Some(names) = self.persisted_announced_skill_names {
             tool_bridge.restore_announced_skill_names(names).await;

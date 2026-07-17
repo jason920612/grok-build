@@ -128,6 +128,8 @@ pub fn canonical_input(input: &ToolInput) -> Option<serde_json::Value> {
         | ToolInput::SchedulerDelete(_)
         | ToolInput::SchedulerList(_)
         | ToolInput::UpdateGoal(_)
+        | ToolInput::BoardPost(_)
+        | ToolInput::BoardRead(_)
         | ToolInput::Dynamic(_) => return None,
     })
 }

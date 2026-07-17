@@ -100,6 +100,8 @@ pub enum ToolKind {
     UseTool,
     Monitor,
     GoalUpdate,
+    BoardRead,
+    BoardPost,
     #[serde(other)]
     Other,
 }

@@ -10,6 +10,7 @@
 //! `AvailableSkills`, `BashParams`) and registers every built-in tool.
 pub mod ask_user_question;
 pub mod bash;
+pub mod blackboard;
 #[path = "deploy_app_stub.rs"]
 pub mod deploy_app;
 pub mod enter_plan_mode;
@@ -34,6 +35,7 @@ pub mod web_fetch;
 pub mod web_search;
 pub use ask_user_question::AskUserQuestionTool;
 pub use bash::BashTool;
+pub use blackboard::{BlackboardCfg, BlackboardDigestReminder, BoardPostTool, BoardReadTool};
 pub use deploy_app::{AppBuilderDeployerConfig, DEPLOY_APP_TOOL_NAME};
 pub use enter_plan_mode::EnterPlanModeTool;
 pub use exit_plan_mode::ExitPlanModeTool;

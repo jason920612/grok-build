@@ -671,6 +671,8 @@ impl ToolRegistryBuilder {
         b.register::<grok_build::KillTaskTool>();
         b.register::<grok_build::KillTerminalCommandTool>();
         b.register::<grok_build::TodoWriteTool>();
+        b.register::<grok_build::BoardPostTool>();
+        b.register::<grok_build::BoardReadTool>();
         b.register::<grok_build::UpdateGoalTool>();
         b.register::<grok_build::TaskOutputTool>();
         b.register::<grok_build::GetTerminalCommandOutputTool>();
@@ -739,6 +741,7 @@ impl ToolRegistryBuilder {
         b.register_reminder(crate::reminders::LspDiagnosticsReminder);
         b.register_reminder(crate::reminders::TaskCompletionReminder);
         b.register_reminder(SkillDiscoveryReminder);
+        b.register_reminder(grok_build::BlackboardDigestReminder);
         for pack in tool_packs().lock().iter() {
             pack(&mut b);
         }
@@ -1479,6 +1482,10 @@ impl FinalizedToolset {
         let tool_name = tool_name.to_owned();
         let tool_call_id = tool_call_id.to_owned();
         Box::pin(async_stream::stream! {
+            if let Err(e) = this.check_verify_gate(&tool_name).await {
+                yield xai_tool_runtime::ToolStreamItem::Terminal(Err(e));
+                return;
+            }
             let parts = match this.prepare_dispatch(& tool_name, tool_args, &
             tool_call_id, cwd_override,) { Ok(parts) => parts, Err(e) => { yield
             xai_tool_runtime::ToolStreamItem::Terminal(Err(e)); return; } }; let
@@ -1496,6 +1503,55 @@ impl FinalizedToolset {
             yield
             xai_tool_runtime::ToolStreamItem::Terminal(Err(stream_no_terminal_error()));
         })
+    }
+    /// Verify-first gate: while a blackboard is configured for this session,
+    /// planning/delegation tools (`todo_write`, `task`, `exit_plan_mode`) are
+    /// refused until the agent has observed the current state this turn
+    /// (read a file, searched, run a command, or read the board). Observing
+    /// tools mark the gate as satisfied; the session host resets it at each
+    /// user-turn start.
+    ///
+    /// Inactive when no [`grok_build::BlackboardCfg`] resource is present
+    /// (hosts that did not opt into the collaboration discipline), or when
+    /// `GROK_VERIFY_FIRST=0` is set.
+    async fn check_verify_gate(
+        &self,
+        tool_name: &str,
+    ) -> Result<(), xai_tool_runtime::ToolError> {
+        use crate::implementations::grok_build::blackboard;
+        let kind = {
+            let tools = self.tools.read();
+            match tools.iter().find(|t| t.client_name == tool_name) {
+                Some(t) => t.metadata.kind(),
+                None => return Ok(()),
+            }
+        };
+        let verifies = blackboard::kind_verifies(kind);
+        let gated = blackboard::kind_requires_verification(kind);
+        if !verifies && !gated {
+            return Ok(());
+        }
+        if std::env::var("GROK_VERIFY_FIRST").is_ok_and(|v| v == "0" || v.eq_ignore_ascii_case("off")) {
+            return Ok(());
+        }
+        let mut res = self.resources.lock().await;
+        if res
+            .get::<crate::implementations::grok_build::blackboard::BlackboardCfg>()
+            .is_none()
+        {
+            return Ok(());
+        }
+        let gate = res.get_or_default::<blackboard::VerifyGate>();
+        if verifies {
+            gate.verified = true;
+            return Ok(());
+        }
+        if !gate.verified {
+            return Err(xai_tool_runtime::ToolError::invalid_arguments(
+                blackboard::gate_rejection_message(tool_name),
+            ));
+        }
+        Ok(())
     }
     /// Pre-dispatch setup shared by [`call`] / [`call_streaming`].
     ///

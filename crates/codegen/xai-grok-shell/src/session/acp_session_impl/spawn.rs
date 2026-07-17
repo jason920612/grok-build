@@ -569,6 +569,19 @@ pub(crate) async fn spawn_session_actor(
         };
     let bridge_state_path =
         crate::session::persistence::session_dir(&session_info).join("tool_state.json");
+    // Team blackboard: subagent spawns arrive with the parent's board path
+    // already set on the ToolContext; root sessions create theirs here.
+    if tool_context.blackboard_path.is_none() {
+        tool_context.blackboard_path =
+            Some(crate::session::persistence::session_dir(&session_info).join("blackboard.jsonl"));
+    }
+    let blackboard_author = if tool_context.subagent_depth == 0 {
+        "main".to_string()
+    } else {
+        let id = session_info.id.0.to_string();
+        let short = &id[..id.len().min(8)];
+        format!("{}#{}", agent_definition.name, short)
+    };
     let initial_agent_type = Some(agent_definition.name.clone());
     let harness_metrics = if telemetry_enabled || xai_grok_telemetry::external::is_active() {
         let plugin_names = plugin_registry
@@ -796,6 +809,8 @@ pub(crate) async fn spawn_session_actor(
         fs_backend: fs_backend.clone(),
         tools_notification_handle: tools_notification_handle.clone(),
         bridge_state_path: bridge_state_path.clone(),
+        blackboard_path: tool_context.blackboard_path.clone(),
+        blackboard_author: blackboard_author.clone(),
         session_env: tool_context.session_env.clone(),
         models_manager: models_manager.clone(),
         compaction_policy,

@@ -112,6 +112,11 @@ pub struct ToolContext {
     /// [`BlockingWaitGuard`]). `queue_input` reads it: a prompt arriving while
     /// non-zero takes the send-now path.
     pub blocking_wait_depth: Arc<std::sync::atomic::AtomicUsize>,
+    /// Path of the shared team blackboard for this session tree. Root
+    /// sessions set it to `<session_dir>/blackboard.jsonl`; subagents
+    /// inherit the parent's value verbatim so grandchildren still post to
+    /// the root's board.
+    pub blackboard_path: Option<std::path::PathBuf>,
 }
 impl ToolContext {
     pub fn new(
@@ -151,6 +156,7 @@ impl ToolContext {
             auto_wake_enabled: true,
             goal_loop_active_gate: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             blocking_wait_depth: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            blackboard_path: None,
         }
     }
     pub fn with_preloaded_env(
@@ -187,6 +193,7 @@ impl ToolContext {
             auto_wake_enabled: true,
             goal_loop_active_gate: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             blocking_wait_depth: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            blackboard_path: None,
         }
     }
     pub fn with_file_state_handle(mut self, handle: FileStateHandle) -> Self {
@@ -243,6 +250,7 @@ mod tests {
                 auto_wake_enabled: true,
                 goal_loop_active_gate: Arc::new(std::sync::atomic::AtomicBool::new(false)),
                 blocking_wait_depth: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+                blackboard_path: None,
             }
         }
     }

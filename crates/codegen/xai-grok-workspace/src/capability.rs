@@ -103,6 +103,8 @@ pub(crate) const ALL_TOOL_KINDS: &[ToolKind] = &[
     ToolKind::UseTool,
     ToolKind::Monitor,
     ToolKind::GoalUpdate,
+    ToolKind::BoardRead,
+    ToolKind::BoardPost,
     ToolKind::Other,
 ];
 
@@ -126,8 +128,11 @@ pub(crate) fn kind_allowed(mode: CapabilityMode, kind: ToolKind) -> bool {
     }
 
     match kind {
-        // Meta tools: always allowed.
-        Plan | EnterPlan | ExitPlan | AskUser | Skill | SearchTool | GoalUpdate => true,
+        // Meta tools: always allowed. The blackboard is team coordination
+        // state, not workspace mutation, so both directions stay available
+        // in every mode.
+        Plan | EnterPlan | ExitPlan | AskUser | Skill | SearchTool | GoalUpdate | BoardRead
+        | BoardPost => true,
 
         // Read class.
         Read | MemoryGet | MemorySearch => {

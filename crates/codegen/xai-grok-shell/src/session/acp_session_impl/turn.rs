@@ -244,6 +244,15 @@ impl SessionActor {
         *self.turn_start_prompt_mode.lock() = prompt_mode;
         *self.turn_prompt_mode.lock() = prompt_mode;
         self.signals_handle().increment_turn();
+        // Verify-first gate: each turn starts unverified — the agent must
+        // observe current state (read/search/board_read/execute) before the
+        // dispatch layer lets planning/delegation tools through.
+        {
+            let bridge = self.agent.borrow().tool_bridge().clone();
+            bridge.toolset().resources.lock().await.insert(
+                xai_grok_tools::implementations::grok_build::blackboard::VerifyGate::default(),
+            );
+        }
         self.reconcile_plan_mode_with_prompt(prompt_mode);
         let _turn_active_guard =
             TurnActiveGuard::activate(self.tool_context.is_turn_active.as_ref());

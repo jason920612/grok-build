@@ -259,7 +259,7 @@ impl PromptContext {
     /// correctly regardless of prompt mode.
     pub async fn render(&self, tool_bridge: &ToolBridge) -> Option<String> {
         let placeholders = self.placeholders();
-        let prompt = match self.prompt_mode {
+        let mut prompt = match self.prompt_mode {
             PromptMode::Extend => {
                 let decrypted;
                 let base = match &self.system_prompt {
@@ -293,6 +293,23 @@ impl PromptContext {
                 tool_bridge.render_prompt(body, &placeholders).await?
             }
         };
+        // Team-blackboard discipline: rendered for any toolset that includes
+        // the board tools (the template guards itself with an `if`), for both
+        // primary and subagent audiences — the discipline only works when the
+        // whole team follows it.
+        if let Some(collab) = tool_bridge
+            .render_prompt(
+                crate::prompt::collaboration::COLLABORATION_TEMPLATE,
+                &placeholders,
+            )
+            .await
+        {
+            let collab = collab.trim();
+            if !collab.is_empty() {
+                prompt.push_str("\n\n");
+                prompt.push_str(collab);
+            }
+        }
         Some(prompt)
     }
 }
