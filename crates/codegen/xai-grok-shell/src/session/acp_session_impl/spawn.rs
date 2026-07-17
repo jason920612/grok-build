@@ -531,6 +531,15 @@ pub(crate) async fn spawn_session_actor(
             goal_loop_active: tool_context.goal_loop_active_gate.clone(),
         },
     );
+    // Team blackboard: subagent spawns arrive with the parent's board path
+    // already set on the ToolContext; root sessions create theirs here.
+    // MUST happen before `tool_context_for_handle` is cloned below — the
+    // subagent coordinator reads the board path from the stored handle to
+    // pass it on to children.
+    if tool_context.blackboard_path.is_none() {
+        tool_context.blackboard_path =
+            Some(crate::session::persistence::session_dir(&session_info).join("blackboard.jsonl"));
+    }
     let tool_context_for_handle = tool_context.clone();
     let resolve_search_shadows = || {
         let user_cfg = crate::config::load_effective_config().ok();
@@ -569,12 +578,6 @@ pub(crate) async fn spawn_session_actor(
         };
     let bridge_state_path =
         crate::session::persistence::session_dir(&session_info).join("tool_state.json");
-    // Team blackboard: subagent spawns arrive with the parent's board path
-    // already set on the ToolContext; root sessions create theirs here.
-    if tool_context.blackboard_path.is_none() {
-        tool_context.blackboard_path =
-            Some(crate::session::persistence::session_dir(&session_info).join("blackboard.jsonl"));
-    }
     let blackboard_author = if tool_context.subagent_depth == 0 {
         "main".to_string()
     } else {

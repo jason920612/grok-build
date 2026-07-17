@@ -221,6 +221,10 @@ impl SubagentCapabilityModeExt for SubagentCapabilityMode {
                 ToolKind::ExitPlan,
                 ToolKind::AskUser,
                 ToolKind::Skill,
+                // Blackboard access is team coordination, not workspace
+                // mutation — it survives every capability mode.
+                ToolKind::BoardRead,
+                ToolKind::BoardPost,
             ],
             Self::ReadWrite => &[
                 ToolKind::Read,
@@ -248,6 +252,10 @@ impl SubagentCapabilityModeExt for SubagentCapabilityMode {
                 ToolKind::ExitPlan,
                 ToolKind::AskUser,
                 ToolKind::Skill,
+                // Blackboard access is team coordination, not workspace
+                // mutation — it survives every capability mode.
+                ToolKind::BoardRead,
+                ToolKind::BoardPost,
             ],
             Self::Execute => &[
                 ToolKind::Read,
@@ -268,6 +276,10 @@ impl SubagentCapabilityModeExt for SubagentCapabilityMode {
                 ToolKind::ExitPlan,
                 ToolKind::AskUser,
                 ToolKind::Skill,
+                // Blackboard access is team coordination, not workspace
+                // mutation — it survives every capability mode.
+                ToolKind::BoardRead,
+                ToolKind::BoardPost,
             ],
             Self::All => &[
                 ToolKind::Read,
@@ -296,6 +308,10 @@ impl SubagentCapabilityModeExt for SubagentCapabilityMode {
                 ToolKind::ExitPlan,
                 ToolKind::AskUser,
                 ToolKind::Skill,
+                // Blackboard access is team coordination, not workspace
+                // mutation — it survives every capability mode.
+                ToolKind::BoardRead,
+                ToolKind::BoardPost,
             ],
         }
     }
