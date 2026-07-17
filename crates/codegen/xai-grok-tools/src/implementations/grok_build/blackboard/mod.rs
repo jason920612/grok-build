@@ -201,6 +201,101 @@ fn board_cfg_or_missing(
     })
 }
 
+// ── Evidence spot-check ─────────────────────────────────────────────────
+
+/// How many parsable `file:line` references get spot-checked per post.
+const EVIDENCE_SPOT_CHECKS: usize = 2;
+/// Files larger than this are not line-counted (existence check only).
+const EVIDENCE_MAX_FILE_BYTES: u64 = 2 * 1024 * 1024;
+
+/// A `path:N` / `path:N-M` reference extracted from an evidence string.
+struct EvidenceRef {
+    raw: String,
+    path: String,
+    line: u64,
+}
+
+/// Extract a leading `file:line` reference from one evidence string, if the
+/// first token looks like one. Only strings that *claim* a file location are
+/// candidates — command output, URLs, and prose pass through unchecked.
+fn parse_evidence_ref(evidence: &str) -> Option<EvidenceRef> {
+    let token = evidence.split_whitespace().next()?;
+    let token = token.trim_end_matches([',', ';', '.', ')']);
+    if token.contains("://") {
+        return None; // URL
+    }
+    let (path, suffix) = token.rsplit_once(':')?;
+    if path.is_empty() || !(path.contains('/') || path.contains('\\') || path.contains('.')) {
+        return None; // not path-shaped (e.g. "note:" prefixes)
+    }
+    let start = suffix.split('-').next()?;
+    let line = start.parse::<u64>().ok()?;
+    if line == 0 {
+        return None;
+    }
+    Some(EvidenceRef {
+        raw: token.to_string(),
+        path: path.to_string(),
+        line,
+    })
+}
+
+/// Spot-check up to [`EVIDENCE_SPOT_CHECKS`] file references against the real
+/// filesystem: the file must exist and contain the cited line. This catches
+/// fabricated citations, not wrong conclusions — an agent can still cite a
+/// real line and misread it, but it cannot invent locations.
+fn spot_check_evidence(
+    evidence: &[String],
+    cwd: Option<&Path>,
+) -> Result<(), String> {
+    let mut checked = 0usize;
+    for ev in evidence {
+        if checked >= EVIDENCE_SPOT_CHECKS {
+            break;
+        }
+        let Some(eref) = parse_evidence_ref(ev) else {
+            continue;
+        };
+        checked += 1;
+        let candidate = Path::new(&eref.path);
+        let resolved = if candidate.is_absolute() {
+            candidate.to_path_buf()
+        } else {
+            match cwd {
+                Some(base) => base.join(candidate),
+                None => continue, // no cwd to resolve against — skip
+            }
+        };
+        let meta = match std::fs::metadata(&resolved) {
+            Ok(m) => m,
+            Err(_) => {
+                return Err(format!(
+                    "evidence cites '{}' but {} does not exist. Cite locations you actually \
+                     read — fabricated references are rejected.",
+                    eref.raw,
+                    resolved.display()
+                ));
+            }
+        };
+        if !meta.is_file() || meta.len() > EVIDENCE_MAX_FILE_BYTES {
+            continue;
+        }
+        if let Ok(content) = std::fs::read_to_string(&resolved) {
+            let line_count = content.lines().count() as u64;
+            if eref.line > line_count {
+                return Err(format!(
+                    "evidence cites '{}' but {} has only {} lines. Cite locations you \
+                     actually read — fabricated references are rejected.",
+                    eref.raw,
+                    resolved.display(),
+                    line_count
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
 // ── board_post ──────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -304,10 +399,30 @@ impl xai_tool_runtime::Tool for BoardPostTool {
             ));
         }
 
-        let cfg = {
+        let (cfg, cwd) = {
             let res = resources.lock().await;
-            board_cfg_or_missing(&res, "board_post")?
+            (
+                board_cfg_or_missing(&res, "board_post")?,
+                res.get::<crate::types::resources::Cwd>().map(|c| c.0.clone()),
+            )
         };
+
+        if input.kind.requires_evidence() {
+            let evidence = input.evidence.clone();
+            let check = tokio::task::spawn_blocking(move || {
+                spot_check_evidence(&evidence, cwd.as_deref())
+            })
+            .await
+            .map_err(|e| {
+                xai_tool_runtime::ToolError::custom(
+                    "board_post",
+                    format!("evidence check task panicked: {e}"),
+                )
+            })?;
+            if let Err(msg) = check {
+                return Err(xai_tool_runtime::ToolError::invalid_arguments(msg));
+            }
+        }
 
         let entry = BoardEntry {
             id: uuid::Uuid::now_v7().simple().to_string(),
@@ -369,6 +484,12 @@ pub struct BoardReadInput {
     #[schemars(description = "Show at most the newest N matching entries (default 50).")]
     #[serde(default)]
     pub limit: Option<usize>,
+
+    #[schemars(
+        description = "Also show entries that a later correction superseded (hidden by default)."
+    )]
+    #[serde(default)]
+    pub include_superseded: bool,
 }
 
 /// Read the shared blackboard (optionally filtered).
@@ -446,10 +567,24 @@ impl xai_tool_runtime::Tool for BoardReadTool {
             cursor.0.seen = total;
         }
 
+        // A correction supersedes the entry it replies to: superseded facts
+        // are dead by default, not merely flagged, so agents can't keep
+        // building on them by skimming the board.
+        let superseded: std::collections::HashSet<&str> = entries
+            .iter()
+            .filter(|e| e.kind == EntryKind::Correction)
+            .filter_map(|e| e.reply_to.as_deref())
+            .collect();
+        let hidden_superseded = entries
+            .iter()
+            .filter(|e| superseded.contains(e.id.as_str()))
+            .count();
+
         let limit = input.limit.unwrap_or(50).max(1);
         let matching: Vec<String> = entries
             .iter()
             .enumerate()
+            .filter(|(_, e)| input.include_superseded || !superseded.contains(e.id.as_str()))
             .filter(|(_, e)| {
                 input
                     .topic
@@ -461,7 +596,13 @@ impl xai_tool_runtime::Tool for BoardReadTool {
                         .as_deref()
                         .is_none_or(|a| e.author == a)
             })
-            .map(|(i, e)| e.render(i as u64 + 1))
+            .map(|(i, e)| {
+                let mut line = e.render(i as u64 + 1);
+                if superseded.contains(e.id.as_str()) {
+                    line.push_str(" [superseded by a correction]");
+                }
+                line
+            })
             .collect();
 
         let shown = matching.len().min(limit);
@@ -473,13 +614,18 @@ impl xai_tool_runtime::Tool for BoardReadTool {
             }
         } else {
             let listed = matching[matching.len() - shown..].join("\n");
-            format!(
-                "Blackboard ({} matching of {} total, showing newest {}):\n{}",
+            let mut header = format!(
+                "Blackboard ({} matching of {} total, showing newest {})",
                 matching.len(),
                 total,
-                shown,
-                listed
-            )
+                shown
+            );
+            if !input.include_superseded && hidden_superseded > 0 {
+                header.push_str(&format!(
+                    ", {hidden_superseded} superseded hidden — includeSuperseded to view"
+                ));
+            }
+            format!("{header}:\n{listed}")
         };
 
         Ok(ToolOutput::Text(text.into()))
@@ -492,8 +638,20 @@ impl xai_tool_runtime::Tool for BoardReadTool {
 /// agent has not seen yet (excluding its own posts). This is what makes the
 /// blackboard an asynchronous meeting — agents keep working and get new
 /// entries pushed into their context as they appear.
+///
+/// Broadcast-tax control: with N agents posting, naive push is O(N²) tokens.
+/// Corrections are always delivered in full; everything else is budgeted to
+/// [`DIGEST_MAX_ENTRIES`] newest entries per digest, with the overflow
+/// collapsed to a topic list + a pointer to `board_read`.
+///
+/// Hard consequence of corrections: receiving one resets this agent's
+/// [`VerifyGate`], so its next planning/delegation call is refused until it
+/// has re-observed the world — "please re-verify" is enforced, not advisory.
 #[derive(Debug, Default)]
 pub struct BlackboardDigestReminder;
+
+/// Max non-correction entries shown per digest.
+const DIGEST_MAX_ENTRIES: usize = 5;
 
 #[async_trait::async_trait]
 impl Reminder for BlackboardDigestReminder {
@@ -520,40 +678,71 @@ impl Reminder for BlackboardDigestReminder {
             return vec![];
         }
 
-        let fresh: Vec<String> = entries
+        let fresh: Vec<(usize, &BoardEntry)> = entries
             .iter()
             .enumerate()
             .skip(seen as usize)
             .filter(|(_, e)| e.author != cfg.author)
-            .map(|(i, e)| {
-                let rendered = e.render(i as u64 + 1);
-                if e.kind == EntryKind::Correction {
-                    format!("!! {rendered}")
-                } else {
-                    rendered
-                }
-            })
             .collect();
+
+        let has_correction = fresh
+            .iter()
+            .any(|(_, e)| e.kind == EntryKind::Correction);
 
         {
             let mut res = resources.lock().await;
             let cursor = res.get_or_default::<State<BoardCursor>>();
             cursor.0.seen = total;
+            // A correction invalidates something this agent may be relying
+            // on: force re-verification before its next plan/delegation.
+            if has_correction {
+                res.get_or_default::<VerifyGate>().verified = false;
+            }
         }
 
         if fresh.is_empty() {
             return vec![];
         }
 
-        let has_correction = fresh.iter().any(|l| l.starts_with("!! "));
+        // Corrections always shown in full; the rest budgeted, newest last.
+        let (corrections, others): (Vec<_>, Vec<_>) = fresh
+            .iter()
+            .partition(|(_, e)| e.kind == EntryKind::Correction);
+        let overflow = others.len().saturating_sub(DIGEST_MAX_ENTRIES);
+        let mut lines: Vec<String> = corrections
+            .iter()
+            .map(|(i, e)| format!("!! {}", e.render(*i as u64 + 1)))
+            .collect();
+        lines.extend(
+            others
+                .iter()
+                .skip(overflow)
+                .map(|(i, e)| e.render(*i as u64 + 1)),
+        );
+
         let mut msg = format!(
             "New blackboard entries from teammates ({}):\n{}",
             fresh.len(),
-            fresh.join("\n")
+            lines.join("\n")
         );
+        if overflow > 0 {
+            let mut topics: Vec<&str> = others
+                .iter()
+                .take(overflow)
+                .map(|(_, e)| e.topic.as_str())
+                .collect();
+            topics.dedup();
+            msg.push_str(&format!(
+                "\n(+{} older entries not shown, topics: {} — use board_read to catch up)",
+                overflow,
+                topics.join(", ")
+            ));
+        }
         if has_correction {
             msg.push_str(
-                "\nEntries marked '!!' are corrections: something you may believe is stale. Re-verify before relying on it.",
+                "\nEntries marked '!!' are corrections: something you may believe is stale. \
+                 Your verify-first gate has been reset — re-verify the affected facts before \
+                 planning or delegating again.",
             );
         }
         msg.push_str(
@@ -570,7 +759,14 @@ impl Reminder for BlackboardDigestReminder {
 /// started? The dispatch layer refuses planning/delegation tools
 /// (`todo_write`, `task`, `exit_plan_mode`) until it has.
 ///
-/// Ephemeral resource: reset by the session host at each user-turn start.
+/// GUARANTEE BOUNDARY: the gate proves an observation *happened* this
+/// turn, not that it was relevant or understood — reading one unrelated
+/// file satisfies it. It is a floor against planning blind, defeatable by
+/// minimal compliance; relevance is enforced only by the prompt
+/// discipline and by teammates challenging unsupported posts.
+///
+/// Ephemeral resource: reset by the session host at each user-turn start,
+/// and by [`BlackboardDigestReminder`] when a correction arrives.
 #[derive(Debug, Clone, Default)]
 pub struct VerifyGate {
     pub verified: bool,
@@ -669,6 +865,7 @@ mod tests {
                 kind: None,
                 author: None,
                 limit: None,
+                include_superseded: false,
             },
         )
         .await
@@ -740,6 +937,7 @@ mod tests {
                 kind: None,
                 author: None,
                 limit: None,
+                include_superseded: false,
             },
         )
         .await
@@ -831,6 +1029,173 @@ mod tests {
         assert!(kind_requires_verification(ToolKind::ExitPlan));
         assert!(!kind_requires_verification(ToolKind::Read));
         assert!(!kind_requires_verification(ToolKind::Edit));
+    }
+
+    fn raw_entry(id: &str, author: &str, kind: EntryKind, topic: &str, body: &str) -> BoardEntry {
+        BoardEntry {
+            id: id.into(),
+            ts: now_rfc3339(),
+            author: author.into(),
+            kind,
+            topic: topic.into(),
+            body: body.into(),
+            evidence: vec![],
+            reply_to: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn evidence_citing_missing_file_rejected() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut resources = Resources::new();
+        resources.insert(cfg_in(tmp.path(), "tester"));
+        resources.insert(crate::types::resources::Cwd(tmp.path().to_path_buf()));
+        let shared = resources.into_shared();
+
+        let err = xai_tool_runtime::Tool::run(
+            &BoardPostTool,
+            test_ctx(shared),
+            post_input(
+                EntryKind::Finding,
+                "auth",
+                "made up",
+                &["src/ghost.rs:42 totally real"],
+            ),
+        )
+        .await
+        .unwrap_err();
+        assert!(err.to_string().contains("does not exist"), "got: {err}");
+    }
+
+    #[tokio::test]
+    async fn evidence_citing_line_past_eof_rejected_and_valid_line_accepted() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join("src")).unwrap();
+        std::fs::write(tmp.path().join("src/real.rs"), "line1\nline2\nline3\n").unwrap();
+        let mut resources = Resources::new();
+        resources.insert(cfg_in(tmp.path(), "tester"));
+        resources.insert(crate::types::resources::Cwd(tmp.path().to_path_buf()));
+        let shared = resources.into_shared();
+
+        let err = xai_tool_runtime::Tool::run(
+            &BoardPostTool,
+            test_ctx(shared.clone()),
+            post_input(EntryKind::Finding, "t", "x", &["src/real.rs:99 phantom"]),
+        )
+        .await
+        .unwrap_err();
+        assert!(err.to_string().contains("only 3 lines"), "got: {err}");
+
+        xai_tool_runtime::Tool::run(
+            &BoardPostTool,
+            test_ctx(shared),
+            post_input(EntryKind::Finding, "t", "x", &["src/real.rs:2 line2 content"]),
+        )
+        .await
+        .unwrap();
+    }
+
+    #[test]
+    fn evidence_parser_ignores_non_path_refs() {
+        assert!(parse_evidence_ref("cargo test -> 5 passed").is_none());
+        assert!(parse_evidence_ref("https://example.com/a:1").is_none());
+        assert!(parse_evidence_ref("note: something").is_none());
+        let r = parse_evidence_ref("src/a.rs:12-14 def foo").unwrap();
+        assert_eq!(r.path, "src/a.rs");
+        assert_eq!(r.line, 12);
+    }
+
+    #[tokio::test]
+    async fn superseded_entries_hidden_by_default() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("blackboard.jsonl");
+        append_entry_sync(&path, &raw_entry("e1", "a", EntryKind::Finding, "db", "3 tables"))
+            .unwrap();
+        let mut correction =
+            raw_entry("e2", "b", EntryKind::Correction, "db", "actually 4 tables");
+        correction.reply_to = Some("e1".into());
+        correction.evidence = vec!["schema checked".into()];
+        append_entry_sync(&path, &correction).unwrap();
+
+        let mut resources = Resources::new();
+        resources.insert(cfg_in(tmp.path(), "reader"));
+        let shared = resources.into_shared();
+
+        let read = |include| BoardReadInput {
+            topic: None,
+            kind: None,
+            author: None,
+            limit: None,
+            include_superseded: include,
+        };
+        let out = xai_tool_runtime::Tool::run(&BoardReadTool, test_ctx(shared.clone()), read(false))
+            .await
+            .unwrap();
+        let text = text_of(out);
+        assert!(!text.contains("3 tables"), "superseded must be hidden: {text}");
+        assert!(text.contains("superseded hidden"), "got: {text}");
+
+        let out = xai_tool_runtime::Tool::run(&BoardReadTool, test_ctx(shared), read(true))
+            .await
+            .unwrap();
+        let text = text_of(out);
+        assert!(text.contains("3 tables"), "includeSuperseded must show it: {text}");
+        assert!(text.contains("[superseded by a correction]"), "got: {text}");
+    }
+
+    #[tokio::test]
+    async fn digest_budgets_noncorrections_and_lists_overflow_topics() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("blackboard.jsonl");
+        for i in 0..8 {
+            append_entry_sync(
+                &path,
+                &raw_entry(
+                    &format!("e{i}"),
+                    "poster",
+                    EntryKind::Finding,
+                    &format!("topic{i}"),
+                    &format!("body {i}"),
+                ),
+            )
+            .unwrap();
+        }
+        let mut res = Resources::new();
+        res.insert(cfg_in(tmp.path(), "reader"));
+        let reminders = BlackboardDigestReminder
+            .collect_reminders(res.into_shared(), &ToolOutput::Text("x".into()))
+            .await;
+        assert_eq!(reminders.len(), 1);
+        let msg = &reminders[0];
+        // newest 5 shown, 3 oldest collapsed
+        assert!(msg.contains("body 7") && msg.contains("body 3"), "got: {msg}");
+        assert!(!msg.contains("body 2"), "oldest must be collapsed: {msg}");
+        assert!(msg.contains("+3 older entries not shown"), "got: {msg}");
+        assert!(msg.contains("topic0"), "overflow topics listed: {msg}");
+    }
+
+    #[tokio::test]
+    async fn correction_in_digest_resets_verify_gate() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("blackboard.jsonl");
+        let mut correction =
+            raw_entry("c1", "poster", EntryKind::Correction, "db", "stale fact");
+        correction.evidence = vec!["x".into()];
+        append_entry_sync(&path, &correction).unwrap();
+
+        let mut res = Resources::new();
+        res.insert(cfg_in(tmp.path(), "reader"));
+        res.insert(VerifyGate { verified: true });
+        let shared = res.into_shared();
+        let reminders = BlackboardDigestReminder
+            .collect_reminders(shared.clone(), &ToolOutput::Text("x".into()))
+            .await;
+        assert!(reminders[0].contains("gate has been reset"));
+        let res = shared.lock().await;
+        assert!(
+            !res.get::<VerifyGate>().unwrap().verified,
+            "correction must reset the verify gate"
+        );
     }
 
     #[test]
