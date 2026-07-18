@@ -37,8 +37,16 @@ pub(super) fn plan_image_preview(
     image: &PastedImage,
     protocol: GraphicsProtocol,
 ) -> ImagePreviewPlan<'_> {
+    // Without a graphics protocol the image is drawn from text cells
+    // (half blocks) instead of pixel escapes — that path needs the
+    // in-memory encoded bytes and gets the same tall pixel-box geometry.
+    let show_pixels = if protocol.supports_images() {
+        image.preview.prepared().is_some()
+    } else {
+        image.encoded_bytes.is_some()
+    };
     ImagePreviewPlan {
-        show_pixels: protocol.supports_images() && image.preview.prepared().is_some(),
+        show_pixels,
         display_path: image.source_path.as_deref(),
     }
 }

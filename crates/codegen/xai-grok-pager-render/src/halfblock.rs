@@ -78,6 +78,35 @@ pub fn render_halfblock_lines(
     Some(lines)
 }
 
+/// Single-slot cache for the hover-preview overlay, which re-renders on
+/// every draw frame: keyed by the image's preview identity and the target
+/// cell size. One slot suffices — only one chip preview is visible at a
+/// time — and misses just pay one decode+resize.
+static PREVIEW_CACHE: std::sync::Mutex<Option<(u64, u16, u16, Vec<Line<'static>>)>> =
+    std::sync::Mutex::new(None);
+
+/// [`render_halfblock_lines`] with a single-entry cache keyed by
+/// `(identity, cols, rows)`. For draw-loop call sites that hold only a
+/// shared reference to their image state.
+pub fn render_halfblock_cached(
+    identity: u64,
+    bytes: &[u8],
+    cols: u16,
+    rows: u16,
+) -> Option<Vec<Line<'static>>> {
+    let mut slot = PREVIEW_CACHE.lock().ok()?;
+    if let Some((id, c, r, lines)) = slot.as_ref()
+        && *id == identity
+        && *c == cols
+        && *r == rows
+    {
+        return Some(lines.clone());
+    }
+    let lines = render_halfblock_lines(bytes, cols, rows)?;
+    *slot = Some((identity, cols, rows, lines.clone()));
+    Some(lines)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

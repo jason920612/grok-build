@@ -186,6 +186,40 @@ fn render_image_overlay_inner(
         });
     }
 
+    // Text-cell rendering path: no graphics protocol, draw the image out
+    // of half blocks directly into the buffer. No escapes involved.
+    if !protocol.supports_images() {
+        if let (Some(placement), Some(bytes)) =
+            (geometry.image_placement, image.encoded_bytes.as_ref())
+            && let Some(lines) = crate::halfblock::render_halfblock_cached(
+                image.preview.identity(),
+                bytes,
+                placement.cols,
+                placement.rows,
+            )
+        {
+            let block_h = (lines.len() as u16).min(placement.rows);
+            let block_w = lines
+                .iter()
+                .map(|l| l.spans.len() as u16)
+                .max()
+                .unwrap_or(0)
+                .min(placement.cols);
+            let img_rect = Rect::new(
+                placement.x + placement.cols.saturating_sub(block_w) / 2,
+                placement.y + placement.rows.saturating_sub(block_h) / 2,
+                block_w,
+                block_h,
+            );
+            Paragraph::new(lines).render(img_rect, buf);
+        }
+        return Some(ImageOverlayRender {
+            #[cfg(test)]
+            image_placement: geometry.image_placement,
+            escapes: None,
+        });
+    }
+
     if image_inner.width > 0 && image_inner.height > 0 {
         use crate::render::SafeBuf;
         let loading = "Loading...";

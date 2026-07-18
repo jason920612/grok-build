@@ -163,18 +163,35 @@ pub fn is_paste_key(key: &KeyEvent) -> bool {
     if key!('v', CONTROL).matches(key) || key!('v', SUPER).matches(key) {
         return true;
     }
-    // Windows-only escape hatch: Windows Terminal's default Ctrl+V is a
+    // Windows escape hatch: Windows Terminal's default Ctrl+V is a
     // text-only `paste` action that silently drops image clipboards
     // (Win+Shift+S, browser "Copy Image"). Alt+V is unbound in default
     // WT profiles and reaches us as a normal keypress. macOS excluded
-    // (`Opt+V` types `√`); Linux excluded (no interceptor to escape).
+    // (`Opt+V` types `√`); plain Linux excluded (no interceptor to
+    // escape) — but a Linux build running inside WSL sits behind the
+    // very same Windows Terminal, so the hatch applies there at runtime.
     // Doesn't collide with AltGr — AltGr arrives as `Ctrl+Alt`, not
     // bare `Alt`, and `KeyShortcut::matches` is exact-modifier.
     #[cfg(target_os = "windows")]
     if key!('v', ALT).matches(key) {
         return true;
     }
+    #[cfg(target_os = "linux")]
+    if key!('v', ALT).matches(key) && running_in_wsl() {
+        return true;
+    }
     false
+}
+
+/// Whether this Linux build is running inside Windows Subsystem for Linux
+/// (and therefore behind a Windows terminal emulator).
+#[cfg(target_os = "linux")]
+fn running_in_wsl() -> bool {
+    static WSL: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *WSL.get_or_init(|| {
+        std::env::var_os("WSL_DISTRO_NAME").is_some()
+            || std::env::var_os("WSL_INTEROP").is_some()
+    })
 }
 
 pub fn is_inline_paste_key(key: &KeyEvent) -> bool {
@@ -420,13 +437,19 @@ mod tests {
         assert!(!is_paste_key(&ev));
     }
 
-    /// Alt+V is the Windows-only escape hatch for WT's Ctrl+V interceptor.
-    /// Must NOT match elsewhere (collides with macOS `Opt+V` → `√`).
-    /// Must NOT match AltGr+V on Windows (AltGr = `Ctrl+Alt`, text-input).
+    /// Alt+V is the escape hatch for Windows Terminal's Ctrl+V interceptor:
+    /// active on Windows builds and on Linux builds running inside WSL
+    /// (same interceptor in front). Must NOT match on macOS (collides with
+    /// `Opt+V` → `√`) or plain Linux. Must NOT match AltGr+V (AltGr =
+    /// `Ctrl+Alt`, text-input).
     #[test]
-    fn is_paste_key_alt_v_windows_only() {
+    fn is_paste_key_alt_v_windows_and_wsl_only() {
         let alt_v = KeyEvent::new(KeyCode::Char('v'), KeyModifiers::ALT);
-        assert_eq!(is_paste_key(&alt_v), cfg!(target_os = "windows"));
+        #[cfg(target_os = "linux")]
+        let expected = super::running_in_wsl();
+        #[cfg(not(target_os = "linux"))]
+        let expected = cfg!(target_os = "windows");
+        assert_eq!(is_paste_key(&alt_v), expected);
 
         let altgr_v = KeyEvent::new(
             KeyCode::Char('v'),

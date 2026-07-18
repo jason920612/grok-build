@@ -1296,6 +1296,60 @@ mod platform {
     /// harmless while the lease keeps the shared backend alive.
     const ARBOARD_READ_WAIT: std::time::Duration = std::time::Duration::from_secs(2);
 
+    /// Running inside Windows Subsystem for Linux.
+    #[cfg(target_os = "linux")]
+    fn in_wsl() -> bool {
+        static WSL: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        *WSL.get_or_init(|| {
+            std::env::var_os("WSL_DISTRO_NAME").is_some()
+                || std::env::var_os("WSL_INTEROP").is_some()
+        })
+    }
+
+    /// powershell.exe cold start can take seconds; generous but bounded.
+    #[cfg(target_os = "linux")]
+    const WSL_CLIPBOARD_WAIT: std::time::Duration = std::time::Duration::from_secs(8);
+
+    /// Read an image from the *Windows* clipboard via powershell.exe interop,
+    /// re-encoded as PNG. `Ok(None)` when no raster image is on the
+    /// clipboard. Runs on an abandonable worker so a hung interop call
+    /// cannot freeze the probe.
+    #[cfg(target_os = "linux")]
+    fn wsl_windows_clipboard_image() -> anyhow::Result<Option<ImageData>> {
+        use base64::Engine as _;
+        const SCRIPT: &str = "Add-Type -AssemblyName System.Drawing; \
+             $img = Get-Clipboard -Format Image; \
+             if ($img) { \
+               $ms = New-Object System.IO.MemoryStream; \
+               $img.Save($ms, [System.Drawing.Imaging.ImageFormat]::Png); \
+               [Convert]::ToBase64String($ms.ToArray()) \
+             }";
+        let output = spawn_with_deadline("wsl-clipboard-read", WSL_CLIPBOARD_WAIT, || {
+            Command::new("powershell.exe")
+                .args(["-NoProfile", "-NonInteractive", "-Command", SCRIPT])
+                .stdin(Stdio::null())
+                .stderr(Stdio::null())
+                .output()
+        })
+        .map_err(|e| anyhow::anyhow!("powershell.exe clipboard read did not complete: {e}"))??;
+        if !output.status.success() {
+            anyhow::bail!("powershell.exe exited with {}", output.status);
+        }
+        let b64: Vec<u8> = output
+            .stdout
+            .into_iter()
+            .filter(|b| !b.is_ascii_whitespace())
+            .collect();
+        if b64.is_empty() {
+            return Ok(None);
+        }
+        let data = base64::engine::general_purpose::STANDARD.decode(b64)?;
+        Ok(Some(ImageData {
+            data,
+            mime_type: "image/png".to_owned(),
+        }))
+    }
+
     fn arboard_read_with_deadline<T: Send + 'static>(
         op: impl FnOnce(&mut arboard::Clipboard) -> anyhow::Result<T> + Send + 'static,
     ) -> anyhow::Result<T> {
@@ -2044,6 +2098,17 @@ mod platform {
     }
 
     pub fn get_image() -> anyhow::Result<Option<ImageData>> {
+        // WSL: the real clipboard lives on the Windows side and WSLg's
+        // bridge only syncs text, so arboard/X11 can never see an image
+        // copied on Windows. powershell.exe interop is authoritative here;
+        // fall through to the standard legs only if it errors.
+        #[cfg(target_os = "linux")]
+        if in_wsl() {
+            match wsl_windows_clipboard_image() {
+                Ok(result) => return Ok(result),
+                Err(e) => tracing::debug!("WSL powershell clipboard image read failed: {e}"),
+            }
+        }
         let mut arboard_error = None;
         match arboard_get_image() {
             Ok(Some(image)) => return Ok(Some(image)),
