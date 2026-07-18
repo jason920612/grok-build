@@ -2,6 +2,7 @@ pub mod appearance;
 pub mod clipboard;
 pub mod gboom;
 pub mod glyphs;
+pub mod halfblock;
 pub mod host;
 pub mod link_opener;
 pub mod modal_window_state;

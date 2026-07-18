@@ -3483,18 +3483,42 @@ impl AgentView {
                             inner_rows,
                         );
                         if !rendered_pixel {
-                            let meta_lines = vec![
-                                ratatui::text::Line::from(""),
-                                ratatui::text::Line::from(format!(
-                                    "  {}x{} {}",
-                                    viewer.image_width, viewer.image_height, viewer.mime_type,
-                                )),
-                                ratatui::text::Line::from(""),
-                                ratatui::text::Line::from("  Press Esc to close"),
-                            ];
-                            ratatui::widgets::Paragraph::new(meta_lines)
-                                .style(Style::default().fg(theme.gray_dim).bg(theme.bg_base))
-                                .render(inner_rect, buf);
+                            // No graphics protocol (e.g. Windows ConPTY):
+                            // draw the image with half-block text cells.
+                            let halfblock_drawn = viewer
+                                .halfblock_lines(inner_cols, inner_rows)
+                                .map(|lines| {
+                                    let block_h = (lines.len() as u16).min(inner_rows);
+                                    let block_w = lines
+                                        .iter()
+                                        .map(|l| l.spans.len() as u16)
+                                        .max()
+                                        .unwrap_or(0)
+                                        .min(inner_cols);
+                                    let bx = inner_rect.x
+                                        + inner_cols.saturating_sub(block_w) / 2;
+                                    let by = inner_rect.y
+                                        + inner_rows.saturating_sub(block_h) / 2;
+                                    let img_rect =
+                                        ratatui::layout::Rect::new(bx, by, block_w, block_h);
+                                    ratatui::widgets::Paragraph::new(lines.to_vec())
+                                        .render(img_rect, buf);
+                                })
+                                .is_some();
+                            if !halfblock_drawn {
+                                let meta_lines = vec![
+                                    ratatui::text::Line::from(""),
+                                    ratatui::text::Line::from(format!(
+                                        "  {}x{} {}",
+                                        viewer.image_width, viewer.image_height, viewer.mime_type,
+                                    )),
+                                    ratatui::text::Line::from(""),
+                                    ratatui::text::Line::from("  Press Esc to close"),
+                                ];
+                                ratatui::widgets::Paragraph::new(meta_lines)
+                                    .style(Style::default().fg(theme.gray_dim).bg(theme.bg_base))
+                                    .render(inner_rect, buf);
+                            }
                         } else {
                             let loading = "Loading...";
                             let lw = loading.len() as u16;

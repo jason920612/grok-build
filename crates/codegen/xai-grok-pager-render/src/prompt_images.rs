@@ -48,6 +48,16 @@ pub struct ImageViewerState {
     source_path: Option<PathBuf>,
     /// Shared modal chrome state (close button hit-test, hover, etc.).
     pub modal_state: crate::modal_window_state::ModalWindowState,
+    /// Cached half-block rendering for terminals without a graphics
+    /// protocol, keyed by the (cols, rows) it was rendered for.
+    halfblock: Option<HalfblockCache>,
+}
+
+/// Cached [`crate::halfblock`] rendering of the viewer's image.
+struct HalfblockCache {
+    cols: u16,
+    rows: u16,
+    lines: Vec<ratatui::text::Line<'static>>,
 }
 
 pub fn decode_image_dimensions(bytes: &[u8]) -> Option<(u32, u32)> {
@@ -90,6 +100,7 @@ impl ImageViewerState {
             overlay_owner_id: image.preview.identity(),
             source_path: None,
             modal_state: Default::default(),
+            halfblock: None,
         })
     }
 
@@ -117,6 +128,7 @@ impl ImageViewerState {
             overlay_owner_id: crate::terminal::overlay::next_owner_id(),
             source_path: None,
             modal_state: Default::default(),
+            halfblock: None,
         })
     }
 
@@ -138,6 +150,7 @@ impl ImageViewerState {
             overlay_owner_id: crate::terminal::overlay::next_owner_id(),
             source_path: Some(path.to_path_buf()),
             modal_state: Default::default(),
+            halfblock: None,
         }
     }
 
@@ -159,6 +172,25 @@ impl ImageViewerState {
         self.image_width = data.image_width;
         self.image_height = data.image_height;
         self.loading = false;
+        self.halfblock = None;
+    }
+
+    /// Half-block text rendering of the image for terminals without a
+    /// graphics protocol, fitted to `cols` × `rows` cells. Rendered once
+    /// per size and cached — subsequent draw-loop calls are free.
+    pub fn halfblock_lines(&mut self, cols: u16, rows: u16) -> Option<&[ratatui::text::Line<'static>]> {
+        if self.loading || self.image_bytes.is_empty() {
+            return None;
+        }
+        let stale = self
+            .halfblock
+            .as_ref()
+            .is_none_or(|c| c.cols != cols || c.rows != rows);
+        if stale {
+            let lines = crate::halfblock::render_halfblock_lines(&self.image_bytes, cols, rows)?;
+            self.halfblock = Some(HalfblockCache { cols, rows, lines });
+        }
+        self.halfblock.as_ref().map(|c| c.lines.as_slice())
     }
 
     /// Complete the deferred load synchronously (convenience for tests).
