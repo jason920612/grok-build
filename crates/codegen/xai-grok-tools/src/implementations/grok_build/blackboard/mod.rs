@@ -888,6 +888,35 @@ pub struct VerifyGate {
     pub verified: bool,
 }
 
+/// Session-scoped ordering of edit vs execute tool calls, powering the
+/// fresh-evidence completion gate: `update_goal(completed: true)` is
+/// refused while the latest edit has no later execute (i.e. the agent
+/// changed something and never ran anything afterwards). Goals with no
+/// edits at all (research tasks) are exempt.
+#[derive(Debug, Clone, Default)]
+pub struct EvidenceTimeline {
+    pub seq: u64,
+    pub last_edit: u64,
+    pub last_execute: u64,
+}
+
+/// Tool kinds that mutate the workspace for evidence-freshness purposes.
+pub fn kind_edits(kind: ToolKind) -> bool {
+    matches!(
+        kind,
+        ToolKind::Edit | ToolKind::Write | ToolKind::Delete | ToolKind::Move
+    )
+}
+
+/// Rejection message for a stale-evidence completion claim.
+pub fn stale_evidence_message() -> String {
+    "Completion refused by the fresh-evidence gate: your latest change has no \
+     verification run after it. Run your verification commands (tests, the real \
+     user path) AFTER the final edit, confirm the observations, then declare \
+     completion."
+        .to_string()
+}
+
 /// Tool kinds that count as verifying the current state of the world.
 pub fn kind_verifies(kind: ToolKind) -> bool {
     matches!(

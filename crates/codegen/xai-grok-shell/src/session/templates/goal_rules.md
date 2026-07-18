@@ -41,3 +41,13 @@ the change is repo-wide).
 verifies what's complete and tells you what's missing on the next nudge.
 Call `{GOAL_TOOL}(blocked_reason: "reason")` only when truly stuck after multiple
 attempts. Call `{GOAL_TOOL}(message: "status note")` to log progress.
+
+WAITING IS VALID WORK: when the next step genuinely depends on something
+external (a long build, a deploy, CI, a background task), do NOT poll in a
+loop, do NOT invent side-quests, and do NOT declare completion or blocked.
+Declare the wait: `{GOAL_TOOL}(waiting_on: "what you await", check_in_secs: N)`.
+Goal nudges pause; background-task, monitor and scheduler events wake you; at
+the check-in verify the real state and either continue or declare waiting
+again. Pick the wake source by shape: short tasks -> run them as background
+tasks (completion wakes you); streams of events -> a monitor with a selective
+filter; periodic checks -> a one-shot scheduler task.

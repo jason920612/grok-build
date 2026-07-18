@@ -272,6 +272,16 @@ impl SessionActor {
                 }
                 continue;
             }
+            // Legitimate waiting: `waiting_on` opens a wait window during
+            // which continuation nudges pause and background-task /
+            // monitor / scheduler events are delivered (they end the
+            // wait). Never counts toward the blocked streak.
+            if let Some(waiting_on) = cmd.waiting_on.clone() {
+                let secs = cmd.check_in_secs.unwrap_or(300).clamp(30, 3600);
+                let summary = self.begin_goal_wait(waiting_on, secs);
+                try_send_ack(ack_tx, UpdateGoalAck::Accepted { summary });
+                continue;
+            }
             // Verdict files are harness-owned (skeptic panel, per-goal
             // scratch root); this drain never gates `completed: true` on
             // verdict-file state.
@@ -2148,7 +2158,65 @@ impl SessionActor {
     /// and the goal test-suite. The in-turn loop uses
     /// [`Self::run_goal_round_end`] + [`Self::inject_goal_continuation_message`]
     /// instead.
+    /// Whether an unexpired goal wait window is open.
+    pub(crate) fn goal_wait_active(&self) -> bool {
+        self.goal_wait
+            .lock()
+            .as_ref()
+            .is_some_and(|w| w.until > std::time::Instant::now())
+    }
+
+    /// Open (or renew) a goal wait window: continuation nudges pause and
+    /// auto-wake suppression lifts so events can end the wait. Returns the
+    /// ack summary shown to the model.
+    fn begin_goal_wait(&self, waiting_on: String, secs: u64) -> String {
+        *self.goal_wait.lock() = Some(crate::session::acp_session::GoalWaitWindow {
+            waiting_on: waiting_on.clone(),
+            until: std::time::Instant::now() + std::time::Duration::from_secs(secs),
+        });
+        // Lift auto-wake suppression: background-task / monitor / subagent
+        // completions are exactly what the agent is waiting for.
+        self.tool_context
+            .goal_loop_active_gate
+            .store(false, std::sync::atomic::Ordering::Relaxed);
+        tracing::info!(waiting_on = %waiting_on, secs, "goal wait window opened");
+        format!(
+            "Waiting acknowledged: \"{waiting_on}\" ({secs}s window). Goal nudges are paused; \
+             background-task, monitor and scheduler events will wake you. If nothing can wake \
+             you (no background task or monitor is attached to what you await), create a \
+             one-shot check-in now: scheduler_create(interval: \"{secs}s\", recurring: false, \
+             prompt: \"Goal check-in: verify whether '{waiting_on}' has finished; if still \
+             pending, declare waiting again via update_goal\"). Then end your turn — do not poll."
+        )
+    }
+
+    /// Close the wait window (any turn starting means the agent is active
+    /// again). Restores auto-wake suppression when the goal is still
+    /// Active.
+    pub(crate) fn clear_goal_wait(&self, reason: &str) {
+        let had = self.goal_wait.lock().take();
+        if let Some(w) = had {
+            tracing::info!(waiting_on = %w.waiting_on, reason, "goal wait window closed");
+            let goal_active = laziness_injection_active(
+                self.goal_harness_enabled(),
+                self.goal_tracker.lock().status(),
+            );
+            if goal_active {
+                self.tool_context
+                    .goal_loop_active_gate
+                    .store(true, std::sync::atomic::Ordering::Relaxed);
+            }
+        }
+    }
+
     pub(super) async fn maybe_queue_goal_continuation(&self) {
+        // A live wait window suppresses the continuation nudge entirely —
+        // waiting IS the correct next action. Expired windows fall through
+        // (the next turn clears them and nudging resumes).
+        if self.goal_wait_active() {
+            tracing::debug!("goal wait window active; continuation nudge suppressed");
+            return;
+        }
         let current_tokens = self.chat_state_handle.get_total_tokens().await as i64;
         let Some(plan) = self.prepare_goal_continuation(current_tokens).await else {
             return;

@@ -248,6 +248,7 @@ async fn test_e2e_idle_resume_refreshes_model_metadata() {
                 goal_turn_task_ids: parking_lot::Mutex::new(std::collections::HashSet::new()),
                 goal_continuation_streak: std::sync::atomic::AtomicU32::new(0),
                 goal_blocked_streak: std::sync::atomic::AtomicU32::new(0),
+            goal_wait: parking_lot::Mutex::new(None),
                 goal_update_rx: std::cell::RefCell::new(Some(
                     tokio::sync::mpsc::unbounded_channel().1,
                 )),

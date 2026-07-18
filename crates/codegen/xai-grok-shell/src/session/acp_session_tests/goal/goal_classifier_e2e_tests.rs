@@ -385,6 +385,8 @@ fn make_completed() -> UpdateGoalInput {
         completed: Some(true),
         message: None,
         blocked_reason: None,
+        waiting_on: None,
+        check_in_secs: None,
     }
 }
 fn make_blocked(reason: &str) -> UpdateGoalInput {
@@ -392,6 +394,8 @@ fn make_blocked(reason: &str) -> UpdateGoalInput {
         completed: None,
         message: None,
         blocked_reason: Some(reason.to_string()),
+        waiting_on: None,
+        check_in_secs: None,
     }
 }
 /// Replace `goal_update_rx` with a fresh channel carrying the

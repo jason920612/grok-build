@@ -261,6 +261,8 @@ fn make_completed() -> UpdateGoalInput {
         completed: Some(true),
         message: None,
         blocked_reason: None,
+        waiting_on: None,
+        check_in_secs: None,
     }
 }
 

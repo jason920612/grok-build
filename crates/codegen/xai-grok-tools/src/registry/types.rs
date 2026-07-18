@@ -1484,7 +1484,7 @@ impl FinalizedToolset {
         let tool_name = tool_name.to_owned();
         let tool_call_id = tool_call_id.to_owned();
         Box::pin(async_stream::stream! {
-            if let Err(e) = this.check_verify_gate(&tool_name).await {
+            if let Err(e) = this.check_verify_gate(&tool_name, &tool_args).await {
                 yield xai_tool_runtime::ToolStreamItem::Terminal(Err(e));
                 return;
             }
@@ -1519,6 +1519,7 @@ impl FinalizedToolset {
     async fn check_verify_gate(
         &self,
         tool_name: &str,
+        tool_args: &serde_json::Value,
     ) -> Result<(), xai_tool_runtime::ToolError> {
         use crate::implementations::grok_build::blackboard;
         let kind = {
@@ -1528,6 +1529,29 @@ impl FinalizedToolset {
                 None => return Ok(()),
             }
         };
+        // Fresh-evidence timeline: record edit/execute ordering on every
+        // call, and refuse a goal-completion claim whose latest edit has
+        // no later verification run. Independent of the blackboard.
+        {
+            let mut res = self.resources.lock().await;
+            let tl = res.get_or_default::<blackboard::EvidenceTimeline>();
+            tl.seq += 1;
+            if blackboard::kind_edits(kind) {
+                tl.last_edit = tl.seq;
+            }
+            if kind == crate::types::tool::ToolKind::Execute {
+                tl.last_execute = tl.seq;
+            }
+            if kind == crate::types::tool::ToolKind::GoalUpdate
+                && tool_args.get("completed").and_then(|v| v.as_bool()) == Some(true)
+                && tl.last_edit > 0
+                && tl.last_edit > tl.last_execute
+            {
+                return Err(xai_tool_runtime::ToolError::invalid_arguments(
+                    blackboard::stale_evidence_message(),
+                ));
+            }
+        }
         let verifies = blackboard::kind_verifies(kind);
         let gated = blackboard::kind_requires_verification(kind);
         if !verifies && !gated {

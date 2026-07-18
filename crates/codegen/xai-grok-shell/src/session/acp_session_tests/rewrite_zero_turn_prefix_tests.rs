@@ -84,6 +84,8 @@ async fn rebuild_reinjects_goal_update_handle() {
                     completed: Some(true),
                     message: None,
                     blocked_reason: None,
+                    waiting_on: None,
+                    check_in_secs: None,
                 }))
                 .expect("send through re-injected handle");
             let mut rx = actor

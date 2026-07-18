@@ -560,6 +560,14 @@ pub(crate) struct SubagentSpawnInfo {
     pub description: String,
     pub subagent_type: String,
 }
+/// An `update_goal(waiting_on: ...)` wait window: the goal is Active but
+/// legitimately parked on something external until `until` (or an earlier
+/// wake event).
+#[derive(Clone, Debug)]
+pub(crate) struct GoalWaitWindow {
+    pub(crate) waiting_on: String,
+    pub(crate) until: std::time::Instant,
+}
 /// Phase 3: Post-flight handling after dispatch (inline in execute_tool_calls for now).
 pub(crate) struct SessionActor {
     pub(crate) session_info: SessionInfo,
@@ -778,6 +786,12 @@ pub(crate) struct SessionActor {
     /// turn completion, goal completion, or goal resume. Only after 3
     /// consecutive blocked attempts does the goal actually pause.
     pub(crate) goal_blocked_streak: std::sync::atomic::AtomicU32,
+    /// Active goal wait window (`update_goal(waiting_on: ...)`): while the
+    /// deadline is in the future, goal continuation nudges are suppressed
+    /// and background-task/monitor notifications are delivered (they end
+    /// the wait). Cleared at every turn start. Waiting is legitimate work,
+    /// not a blocked signal.
+    pub(crate) goal_wait: parking_lot::Mutex<Option<GoalWaitWindow>>,
     /// Receiver for goal-update envelopes from the `update_goal` tool.
     /// Wrapped in `Option` so the drainer task can `.take()` it at
     /// session start; tests put a fresh receiver back via

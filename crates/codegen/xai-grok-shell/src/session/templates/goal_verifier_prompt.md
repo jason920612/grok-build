@@ -52,7 +52,10 @@ once you can decide:
    and deterministic is standard practice and HONEST; theater is faking the
    unit's OWN logic or its expected output, not its environment.
 3. Confirm the captured evidence shows the observations the plan requires (read
-   it; you can view images).
+   it; you can view images). STALENESS: evidence must postdate the final
+   change — if the implementer's latest code edit came after its last captured
+   test run, the final state was never verified and that alone is grounds to
+   refute.
 4. Do only CHEAP spot-checks: read key files, and reach for **running the code**
    yourself only where cheap. These are the SAME steps the `## Verification plan`
    lists; reuse the implementer's captured run instead of expensive re-runs.

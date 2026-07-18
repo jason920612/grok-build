@@ -158,6 +158,11 @@ impl SessionActor {
         // originated during the goal turn are dropped regardless of status (see
         // `split_goal_suppressed`). Dropped notifications are still marked
         // reported below so nothing resurfaces later.
+        // EXCEPTION: an open goal wait window (`update_goal(waiting_on: ...)`)
+        // inverts the Active-state suppression — background completions and
+        // monitor events are exactly what the waiting agent asked to be
+        // woken by, so they must be delivered (and the delivered turn closes
+        // the wait at turn start).
         let suppress_all = self.goal_harness_enabled()
             && matches!(
                 self.goal_tracker.lock().status(),
@@ -165,7 +170,8 @@ impl SessionActor {
                     crate::session::goal_tracker::GoalStatus::Active
                         | crate::session::goal_tracker::GoalStatus::Complete
                 )
-            );
+            )
+            && !self.goal_wait_active();
 
         let drained_task_ids: Vec<String>;
 

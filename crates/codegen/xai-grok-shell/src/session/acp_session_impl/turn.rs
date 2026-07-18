@@ -244,6 +244,10 @@ impl SessionActor {
         *self.turn_start_prompt_mode.lock() = prompt_mode;
         *self.turn_prompt_mode.lock() = prompt_mode;
         self.signals_handle().increment_turn();
+        // Any turn starting means the agent is active again: close a goal
+        // wait window (the wake event, a check-in, or a user prompt has
+        // arrived) and restore auto-wake suppression for the goal loop.
+        self.clear_goal_wait("turn start");
         // Verify-first gate: each turn starts unverified — the agent must
         // observe current state (read/search/board_read/execute) before the
         // dispatch layer lets planning/delegation tools through.

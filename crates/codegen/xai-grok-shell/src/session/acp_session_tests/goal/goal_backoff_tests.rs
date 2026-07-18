@@ -467,6 +467,8 @@ async fn handle_turn_end_verified_complete_during_drain_skips_bail_nudge() {
                         completed: Some(true),
                         message: None,
                         blocked_reason: None,
+                        waiting_on: None,
+                        check_in_secs: None,
                     },
                 ),
             )
@@ -1444,6 +1446,8 @@ async fn drain_goal_updates_blocked_reason_transitions_after_three_attempts() {
                             completed: None,
                             message: Some("longer body".into()),
                             blocked_reason: Some("short label".into()),
+                            waiting_on: None,
+                            check_in_secs: None,
                         },
                     ),
                 )
@@ -1487,6 +1491,8 @@ async fn drain_goal_updates_blocked_reason_rejected_below_threshold() {
                         completed: None,
                         message: None,
                         blocked_reason: Some("only label".into()),
+                        waiting_on: None,
+                        check_in_secs: None,
                     },
                 ),
             )
@@ -1588,6 +1594,8 @@ async fn drain_goal_updates_blocked_reason_against_non_active_does_not_stash_pau
                         completed: None,
                         message: Some("body".into()),
                         blocked_reason: Some("would-block".into()),
+                        waiting_on: None,
+                        check_in_secs: None,
                     },
                 ),
             )
@@ -1632,6 +1640,8 @@ async fn drain_goal_updates_completes_after_blocked_does_not_leak_pause_message(
                         completed: None,
                         message: None,
                         blocked_reason: Some("blk".into()),
+                        waiting_on: None,
+                        check_in_secs: None,
                     }
 )).unwrap();
                 actor.drain_goal_updates(0, DrainPurpose::TurnEnd).await;
@@ -1649,6 +1659,8 @@ async fn drain_goal_updates_completes_after_blocked_does_not_leak_pause_message(
                         completed: Some(true),
                         message: None,
                         blocked_reason: None,
+                        waiting_on: None,
+                        check_in_secs: None,
                     }
 )).unwrap();
                 drop(tx);
@@ -1683,6 +1695,8 @@ async fn drain_goal_updates_skips_subsequent_completed_after_block() {
                         completed: None,
                         message: None,
                         blocked_reason: Some("X".into()),
+                        waiting_on: None,
+                        check_in_secs: None,
                     },
                 ),
             )
@@ -1693,6 +1707,8 @@ async fn drain_goal_updates_skips_subsequent_completed_after_block() {
                         completed: Some(true),
                         message: None,
                         blocked_reason: None,
+                        waiting_on: None,
+                        check_in_secs: None,
                     },
                 ),
             )
@@ -2273,6 +2289,8 @@ async fn drain_goal_updates_message_only_does_not_change_status() {
                         completed: None,
                         message: Some("Running tests...".into()),
                         blocked_reason: None,
+                        waiting_on: None,
+                        check_in_secs: None,
                     },
                 ),
             )
@@ -2328,6 +2346,8 @@ async fn drain_goal_updates_harness_disabled_does_not_drop_ack() {
                     completed: Some(true),
                     message: Some("Implemented and ran the test; PNG saved.".into()),
                     blocked_reason: None,
+                    waiting_on: None,
+                    check_in_secs: None,
                 },
                 extra_ack_tx,
             );
@@ -2343,6 +2363,8 @@ async fn drain_goal_updates_harness_disabled_does_not_drop_ack() {
                     completed: None,
                     message: Some("progress".into()),
                     blocked_reason: None,
+                    waiting_on: None,
+                    check_in_secs: None,
                 },
                 chan_ack_tx,
             ))
@@ -2388,6 +2410,8 @@ async fn drain_goal_updates_blocked_reason_takes_precedence_over_completed() {
                         completed: Some(true),
                         message: None,
                         blocked_reason: Some("stuck".into()),
+                        waiting_on: None,
+                        check_in_secs: None,
                     },
                 ),
             )
@@ -2419,6 +2443,8 @@ fn make_completed_cmd()
         completed: Some(true),
         message: None,
         blocked_reason: None,
+        waiting_on: None,
+        check_in_secs: None,
     };
     let (ack_tx, _ack_rx) = tokio::sync::oneshot::channel();
     (input, ack_tx)
@@ -2983,6 +3009,8 @@ async fn drain_goal_updates_completed_resets_blocked_streak() {
                         completed: Some(true),
                         message: None,
                         blocked_reason: None,
+                        waiting_on: None,
+                        check_in_secs: None,
                     },
                 ),
             )
@@ -3774,6 +3802,8 @@ async fn blocked_streak_reaches_pause_across_successful_turns() {
                         completed: None,
                         message: None,
                         blocked_reason: Some("cannot reach service".into()),
+                        waiting_on: None,
+                        check_in_secs: None,
                     },
                 )
             };
@@ -4045,6 +4075,8 @@ async fn setup_goal_resets_streaks_from_previous_goal() {
                         completed: None,
                         message: None,
                         blocked_reason: Some("blk".into()),
+                        waiting_on: None,
+                        check_in_secs: None,
                     },
                 ),
             )

@@ -1253,6 +1253,7 @@ pub(crate) async fn spawn_session_actor(
         goal_turn_task_ids: parking_lot::Mutex::new(std::collections::HashSet::new()),
         goal_continuation_streak: std::sync::atomic::AtomicU32::new(0),
         goal_blocked_streak: std::sync::atomic::AtomicU32::new(0),
+            goal_wait: parking_lot::Mutex::new(None),
         goal_update_rx: std::cell::RefCell::new(Some(goal_update_rx)),
         goal_update_tx,
         goal_classifier_enabled: effective_config

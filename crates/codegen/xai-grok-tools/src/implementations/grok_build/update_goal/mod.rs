@@ -36,6 +36,18 @@ pub struct UpdateGoalInput {
         description = "Set only when truly stuck after 3+ consecutive failed attempts at the same problem. If set, the goal is paused as blocked. This is a FAILURE signal — never put success text here. For success, use `completed: true` with `message`."
     )]
     pub blocked_reason: Option<String>,
+
+    #[serde(default)]
+    #[schemars(
+        description = "Declare the goal is legitimately WAITING on something external (long build, deploy, background task, external system). Waiting is valid work: goal continuation nudges pause, and background-task/monitor/scheduler events wake you early. NOT a failure signal; does not count toward blocking. Example: 'CI pipeline 4821 to finish'."
+    )]
+    pub waiting_on: Option<String>,
+
+    #[serde(default)]
+    #[schemars(
+        description = "With waitingOn: seconds until an automatic check-in wakes you if no event arrives first (clamped 30..3600, default 300). At check-in verify the real state; if still waiting, declare waiting again."
+    )]
+    pub check_in_secs: Option<u64>,
 }
 
 // ---------------------------------------------------------------------------
@@ -439,6 +451,8 @@ mod tests {
 
     fn empty_input() -> UpdateGoalInput {
         UpdateGoalInput {
+            waiting_on: None,
+            check_in_secs: None,
             completed: None,
             message: None,
             blocked_reason: None,
@@ -453,6 +467,8 @@ mod tests {
     #[test]
     fn build_summary_completed() {
         let input = UpdateGoalInput {
+            waiting_on: None,
+            check_in_secs: None,
             completed: Some(true),
             ..empty_input()
         };
@@ -462,6 +478,8 @@ mod tests {
     #[test]
     fn build_summary_message_only() {
         let input = UpdateGoalInput {
+            waiting_on: None,
+            check_in_secs: None,
             message: Some("Working on it".into()),
             ..empty_input()
         };
@@ -471,6 +489,8 @@ mod tests {
     #[test]
     fn build_summary_blocked_reason_only() {
         let input = UpdateGoalInput {
+            waiting_on: None,
+            check_in_secs: None,
             blocked_reason: Some("no windows sdk".into()),
             ..empty_input()
         };
@@ -480,6 +500,8 @@ mod tests {
     #[test]
     fn build_summary_blocked_reason_with_message() {
         let input = UpdateGoalInput {
+            waiting_on: None,
+            check_in_secs: None,
             blocked_reason: Some("X".into()),
             message: Some("longer body".into()),
             ..empty_input()
@@ -492,6 +514,8 @@ mod tests {
     #[test]
     fn build_summary_completed_with_message() {
         let input = UpdateGoalInput {
+            waiting_on: None,
+            check_in_secs: None,
             completed: Some(true),
             message: Some("All done".into()),
             ..empty_input()
@@ -504,6 +528,8 @@ mod tests {
     #[test]
     fn build_summary_completed_false_treated_as_noop() {
         let input = UpdateGoalInput {
+            waiting_on: None,
+            check_in_secs: None,
             completed: Some(false),
             ..empty_input()
         };
