@@ -306,7 +306,7 @@ impl xai_tool_runtime::Tool for TaskTool {
                 model,
                 model_override_provenance: ModelOverrideProvenance::Tool,
                 reasoning_effort: None,
-                persona: None,
+                persona: input.persona.clone(),
                 capability_mode: input.capability_mode,
                 isolation: input.isolation,
                 // Model-issued `task` spawns never override the harness; the
@@ -400,7 +400,7 @@ impl xai_tool_runtime::Tool for TaskTool {
         // 6. Return result
         if result.success {
             let resume_from_hint = result.subagent_id.clone();
-            let persona_hint: Option<String> = None;
+            let persona_hint: Option<String> = input.persona.clone();
             Ok(ToolOutput::SubagentCompleted(SubagentCompletedOutput {
                 // SubagentCompletedOutput.output is `String` (serde-visible
                 // boundary). One allocation per completion; cheaper paths
@@ -412,7 +412,7 @@ impl xai_tool_runtime::Tool for TaskTool {
                 turns: result.turns,
                 duration_ms: result.duration_ms,
                 worktree_path: result.worktree_path,
-                persona: None,
+                persona: input.persona,
                 resume_from_hint,
                 persona_hint,
             }))
@@ -509,6 +509,7 @@ mod tests {
             &tool,
             test_ctx(resources.into_shared()),
             TaskToolInput {
+            persona: None,
                 description: "test task".into(),
                 prompt: "do something".into(),
                 subagent_type: "general-purpose".into(),
@@ -541,6 +542,7 @@ mod tests {
             &TaskTool,
             test_ctx(resources.into_shared()),
             TaskToolInput {
+            persona: None,
                 description: "nested spawn".into(),
                 prompt: "should be rejected".into(),
                 subagent_type: "explore".into(),
@@ -572,6 +574,7 @@ mod tests {
             &tool,
             test_ctx(resources.into_shared()),
             TaskToolInput {
+            persona: None,
                 description: "test task".into(),
                 prompt: "do something".into(),
                 subagent_type: "general-purpose".into(),
@@ -631,6 +634,7 @@ mod tests {
             &tool,
             test_ctx(shared),
             TaskToolInput {
+            persona: None,
                 description: "Find auth middleware".into(),
                 prompt: "Search for authentication middleware files".into(),
                 subagent_type: "explore".into(),
@@ -688,6 +692,7 @@ mod tests {
             &tool,
             test_ctx(shared),
             TaskToolInput {
+            persona: None,
                 description: "test task".into(),
                 prompt: "do something".into(),
                 subagent_type: "general-purpose".into(),
@@ -731,6 +736,7 @@ mod tests {
             &tool,
             test_ctx(shared),
             TaskToolInput {
+            persona: None,
                 description: "test task".into(),
                 prompt: "do something".into(),
                 subagent_type: "general-purpose".into(),
@@ -815,6 +821,7 @@ mod tests {
 
     fn task_input(subagent_type: &str, background: bool) -> TaskToolInput {
         TaskToolInput {
+            persona: None,
             description: "test".into(),
             prompt: "do it".into(),
             subagent_type: subagent_type.into(),
@@ -1189,6 +1196,7 @@ mod tests {
     #[test]
     fn task_input_roundtrips_through_json() {
         let input = TaskToolInput {
+            persona: None,
             description: "find bugs".into(),
             prompt: "search for bugs".into(),
             subagent_type: "explore".into(),
@@ -1459,6 +1467,7 @@ mod tests {
             "TaskToolInput JSON schema must not expose fork_context"
         );
         let serialized = serde_json::to_string(&TaskToolInput {
+            persona: None,
             description: "d".into(),
             prompt: "p".into(),
             subagent_type: "general-purpose".into(),
@@ -1509,6 +1518,7 @@ mod tests {
             &TaskTool,
             test_ctx(shared),
             TaskToolInput {
+            persona: None,
                 description: "d".into(),
                 prompt: "p".into(),
                 subagent_type: "general-purpose".into(),
@@ -1545,6 +1555,7 @@ mod tests {
     #[test]
     fn resume_from_not_serialized_when_none() {
         let input = TaskToolInput {
+            persona: None,
             description: "d".into(),
             prompt: "p".into(),
             subagent_type: "general-purpose".into(),
@@ -1592,6 +1603,7 @@ mod tests {
             &TaskTool,
             test_ctx(shared),
             TaskToolInput {
+            persona: None,
                 description: "resume".into(),
                 prompt: "continue".into(),
                 subagent_type: "general-purpose".into(),
@@ -1659,6 +1671,7 @@ mod tests {
                 &TaskTool,
                 test_ctx(shared),
                 TaskToolInput {
+            persona: None,
                     description: "test sentinel".into(),
                     prompt: "work".into(),
                     subagent_type: "general-purpose".into(),
@@ -1705,6 +1718,7 @@ mod tests {
     #[test]
     fn cwd_not_serialized_when_none() {
         let input = TaskToolInput {
+            persona: None,
             description: "d".into(),
             prompt: "p".into(),
             subagent_type: "general-purpose".into(),
@@ -1733,6 +1747,7 @@ mod tests {
             &TaskTool,
             test_ctx(resources.into_shared()),
             TaskToolInput {
+            persona: None,
                 description: "test cwd conflict".into(),
                 prompt: "work".into(),
                 subagent_type: "general-purpose".into(),
@@ -1788,6 +1803,7 @@ mod tests {
             &TaskTool,
             test_ctx(shared),
             TaskToolInput {
+            persona: None,
                 description: "test empty cwd".into(),
                 prompt: "work".into(),
                 subagent_type: "general-purpose".into(),
@@ -1839,6 +1855,7 @@ mod tests {
             &TaskTool,
             test_ctx(shared),
             TaskToolInput {
+            persona: None,
                 description: "test null cwd".into(),
                 prompt: "work".into(),
                 subagent_type: "general-purpose".into(),
@@ -1890,6 +1907,7 @@ mod tests {
             &TaskTool,
             test_ctx(shared),
             TaskToolInput {
+            persona: None,
                 description: "test whitespace cwd".into(),
                 prompt: "work".into(),
                 subagent_type: "general-purpose".into(),
@@ -1944,6 +1962,7 @@ mod tests {
             &TaskTool,
             test_ctx(shared),
             TaskToolInput {
+            persona: None,
                 description: "test nonexistent cwd".into(),
                 prompt: "work".into(),
                 subagent_type: "general-purpose".into(),
@@ -1978,6 +1997,7 @@ mod tests {
             &TaskTool,
             test_ctx(resources.into_shared()),
             TaskToolInput {
+            persona: None,
                 description: "test nonexistent cwd no worktree".into(),
                 prompt: "work".into(),
                 subagent_type: "general-purpose".into(),
@@ -2034,6 +2054,7 @@ mod tests {
                 &TaskTool,
                 test_ctx(shared.clone()),
                 TaskToolInput {
+            persona: None,
                     description: "test sentinel cwd".into(),
                     prompt: "work".into(),
                     subagent_type: "general-purpose".into(),
@@ -2088,6 +2109,7 @@ mod tests {
             &TaskTool,
             test_ctx(shared),
             TaskToolInput {
+            persona: None,
                 description: "cwd test".into(),
                 prompt: "work".into(),
                 subagent_type: "general-purpose".into(),
@@ -2146,6 +2168,7 @@ mod tests {
             &TaskTool,
             test_ctx(shared),
             TaskToolInput {
+            persona: None,
                 description: "stray quote cwd".into(),
                 prompt: "work".into(),
                 subagent_type: "general-purpose".into(),
@@ -2199,6 +2222,7 @@ mod tests {
             &TaskTool,
             test_ctx(shared),
             TaskToolInput {
+            persona: None,
                 description: "cwd with none".into(),
                 prompt: "work".into(),
                 subagent_type: "general-purpose".into(),
@@ -2248,6 +2272,7 @@ mod tests {
             &TaskTool,
             test_ctx(shared),
             TaskToolInput {
+            persona: None,
                 description: "cwd + resume".into(),
                 prompt: "work".into(),
                 subagent_type: "general-purpose".into(),

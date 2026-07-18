@@ -102,6 +102,8 @@ pub enum ToolKind {
     GoalUpdate,
     BoardRead,
     BoardPost,
+    RosterList,
+    RosterAction,
     #[serde(other)]
     Other,
 }

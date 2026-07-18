@@ -673,6 +673,8 @@ impl ToolRegistryBuilder {
         b.register::<grok_build::TodoWriteTool>();
         b.register::<grok_build::BoardPostTool>();
         b.register::<grok_build::BoardReadTool>();
+        b.register::<grok_build::RosterListTool>();
+        b.register::<grok_build::RosterAddTool>();
         b.register::<grok_build::UpdateGoalTool>();
         b.register::<grok_build::TaskOutputTool>();
         b.register::<grok_build::GetTerminalCommandOutputTool>();

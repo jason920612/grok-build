@@ -141,10 +141,38 @@ pub(crate) async fn handle_subagent_request(
         }
     };
     let cwd = ctx.parent_session_info.as_ref().map(|i| std::path::Path::new(&i.cwd));
+    // Roster personas resolve like config personas: when the requested
+    // persona names an active roster entry not present in the config map,
+    // inject its methodology style as the persona instructions. This is
+    // what lets a proposal candidate / leader be spawned AS its roster
+    // identity (board author + verdict-driven personnel actions key on it).
+    let mut effective_personas = ctx.subagent_personas.clone();
+    if let Some(name) = request.runtime_overrides.persona.as_deref()
+        && !effective_personas.contains_key(name)
+    {
+        use xai_grok_tools::implementations::grok_build::roster;
+        let roster_path = ctx.parent_cwd.join(".grok").join("roster.json");
+        if let Some(roster_data) = roster::load_if_exists(&roster_path)
+            && let Some(p) = roster::find_active(&roster_data, name)
+        {
+            effective_personas.insert(
+                name.to_string(),
+                xai_grok_subagent_resolution::SubagentPersona {
+                    instructions: Some(format!(
+                        "You are roster persona \"{}\" (rank {}). Your methodology: {}\n\
+                         Sign all blackboard posts as yourself — your track record and \
+                         personnel consequences attach to this identity.",
+                        p.name, p.rank, p.style
+                    )),
+                    ..Default::default()
+                },
+            );
+        }
+    }
     let effective_runtime = resolve_effective_overrides(
         &request.runtime_overrides,
         role,
-        &ctx.subagent_personas,
+        &effective_personas,
         cwd,
         role_key,
     );
@@ -412,6 +440,32 @@ pub(crate) async fn handle_subagent_request(
                 tracing::info!(
                     subagent_id = % request.id, child_depth, max_depth =
                     MAX_SUBAGENT_DEPTH, "Stripped task tool from child at max depth"
+                );
+            }
+            prune_orphaned_background_task_tools(&mut definition.tool_config);
+        }
+    }
+    // Roster rank gate: a persona's rank decides whether it may command
+    // subagents at all. Rank 0 (every fresh persona) works alone — the task
+    // tool is stripped, mechanically. Promotion through verdicts is the only
+    // way to earn command. Missing roster file / unknown persona = no gate.
+    if let Some(persona) = request.runtime_overrides.persona.as_deref() {
+        use xai_grok_tools::implementations::grok_build::roster;
+        use xai_grok_tools::types::tool::ToolKind;
+        let roster_path = ctx.parent_cwd.join(".grok").join("roster.json");
+        if let Some(roster_data) = roster::load_if_exists(&roster_path)
+            && let Some(p) = roster::find_active(&roster_data, persona)
+            && roster::subagent_quota_for_rank(p.rank) == 0
+        {
+            let before = definition.tool_config.tools.len();
+            definition
+                .tool_config
+                .tools
+                .retain(|tc| tc.kind != Some(ToolKind::Task));
+            if definition.tool_config.tools.len() < before {
+                tracing::info!(
+                    subagent_id = % request.id, persona, rank = p.rank,
+                    "Stripped task tool: rank 0 personas cannot command subagents"
                 );
             }
             prune_orphaned_background_task_tools(&mut definition.tool_config);
@@ -751,6 +805,7 @@ pub(crate) async fn handle_subagent_request(
     tool_ctx.subagent_depth = ctx.parent_depth + 1;
     tool_ctx.lsp = ctx.lsp.clone();
     tool_ctx.blackboard_path = ctx.blackboard_path.clone();
+    tool_ctx.persona = request.runtime_overrides.persona.clone();
     let parent_traceparent = xai_file_utils::trace_context::current_traceparent();
     let tracker_child_cwd = child_session_info.cwd.clone();
     let tracker_model_id = effective_model_id.0.to_string();

@@ -16,4 +16,17 @@ You work as part of a team of agents that shares one blackboard: an append-only 
 4. Correct the board. If you observe reality contradicting a board entry, post a `correction` replying to the stale entry (replyTo). The superseded entry is retired from default board reads, every teammate gets alerted, and their verify-first gates reset — they must re-observe before planning again. Never silently work around a wrong entry — the next agent will trip over it.
 
 New entries from teammates are pushed into your context after tool calls (corrections always in full; others budgeted — use `${{ tools.by_kind.board_read }}` to catch up when the digest overflows). Entries marked `!!` are corrections: re-verify anything you believe that they touch. Reply to questions and challenge doubtful claims via `${{ tools.by_kind.board_post }}` with replyTo.
-</team_blackboard>${% endif %}"#;
+</team_blackboard>${% endif %}${% if tools.by_kind.roster_list %}
+
+<proposal_meritocracy>
+Substantial goals are run as a meritocracy over the personnel roster (`${{ tools.by_kind.roster_list }}`). The cycle:
+
+1. Post the goal as a `direction` board entry — a destination and its constraints, NOT a task breakdown.
+2. Spawn each active roster persona as a candidate for read-only investigation — the task tool call MUST set its `persona` parameter to the exact roster name (a name in the description is NOT enough: board identity and personnel consequences key on the persona parameter). Each candidate verifies the current state, then posts a `proposal` (replyTo the direction) containing: their approach, the first milestone, and SUCCESS CRITERIA AS EXACT RUNNABLE COMMANDS. A proposal whose criteria cannot be executed verbatim is not a proposal.
+3. Select the winning proposal on evidence quality first, roster track record as tiebreaker (`${{ tools.by_kind.roster_list }}`), and post a `decision` (replyTo the winning proposal) with your reasons. For directions with broad impact, ask the user before deciding; the user can always overrule.
+4. THE PROPOSER LEADS: spawn the execution leader with the task tool's `persona` parameter set to the accepted proposal's author — never anyone else. Rank decides command: rank 0 personas execute alone (the task tool is stripped mechanically); promoted personas may direct workers.
+5. When the leader claims completion, spawn an independent verifier that runs the accepted proposal's success criteria VERBATIM and posts a `verdict` (replyTo the proposal, outcome success|failure) with the raw outputs as evidence. Personnel consequences are automatic: success promotes the proposer, failure eliminates them — one strike. Do not soften a failure into a partial success; reality decides.
+6. After an elimination: post the failure analysis as a `finding` so successors inherit it, then refill the roster (`roster_add`) by mutating a winner's style with a genuinely new angle. Keep at least 4 active personas.
+
+You are selecting methodology styles, not people — keep candidate styles genuinely diverse, and never let the same persona both propose and judge its own verdict.
+</proposal_meritocracy>${% endif %}"#;

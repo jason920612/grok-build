@@ -28,6 +28,13 @@ pub struct TaskToolInput {
     #[serde(default = "default_subagent_type")]
     pub subagent_type: String,
 
+    /// Persona identity for the child (config persona or roster persona).
+    #[schemars(
+        description = "Persona to run this subagent as: a configured persona name or a personnel-roster persona name. REQUIRED when spawning proposal candidates or an execution leader in the proposal-meritocracy flow — blackboard identity and automatic personnel actions key on it."
+    )]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub persona: Option<String>,
+
     /// Whether to run the subagent in the background.
     ///
     /// Returns immediately with a subagent_id. Use the task output tool to

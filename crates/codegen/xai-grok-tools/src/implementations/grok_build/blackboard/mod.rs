@@ -68,6 +68,18 @@ pub enum EntryKind {
     /// The board (or a teammate's entry) contradicts observed reality.
     /// Requires evidence and should set `reply_to` to the stale entry.
     Correction,
+    /// A broad goal open for proposals (posted by the orchestrator/user).
+    Direction,
+    /// A candidate's plan for a direction: approach, first milestone, and
+    /// VERIFIABLE success criteria (exact commands). Requires evidence and
+    /// `reply_to` = the direction. The accepted proposal's author becomes
+    /// the leader accountable for the outcome.
+    Proposal,
+    /// The outcome of executing an accepted proposal, judged by running its
+    /// own success criteria verbatim. Requires evidence, `reply_to` = the
+    /// proposal, and an explicit `outcome` — which mechanically drives
+    /// roster personnel actions (promotion / elimination).
+    Verdict,
 }
 
 impl EntryKind {
@@ -79,6 +91,9 @@ impl EntryKind {
             Self::Question => "question",
             Self::Decision => "decision",
             Self::Correction => "correction",
+            Self::Direction => "direction",
+            Self::Proposal => "proposal",
+            Self::Verdict => "verdict",
         }
     }
 
@@ -86,9 +101,23 @@ impl EntryKind {
     const fn requires_evidence(&self) -> bool {
         matches!(
             self,
-            Self::Finding | Self::TestResult | Self::Claim | Self::Correction
+            Self::Finding
+                | Self::TestResult
+                | Self::Claim
+                | Self::Correction
+                | Self::Proposal
+                | Self::Verdict
         )
     }
+}
+
+/// Explicit outcome carried by `verdict` entries — the input to the
+/// mechanical personnel machinery, deliberately not inferred from prose.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum VerdictOutcome {
+    Success,
+    Failure,
 }
 
 /// One line in `blackboard.jsonl`.
@@ -108,6 +137,9 @@ pub struct BoardEntry {
     /// Id of the entry this one replies to (discussion threads, corrections).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reply_to: Option<String>,
+    /// Explicit outcome — present on `verdict` entries only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub outcome: Option<VerdictOutcome>,
 }
 
 impl BoardEntry {
@@ -321,10 +353,16 @@ pub struct BoardPostInput {
     pub evidence: Vec<String>,
 
     #[schemars(
-        description = "Optional id of the board entry this replies to (discussion thread / the stale entry a correction fixes)."
+        description = "Optional id of the board entry this replies to (discussion thread / the stale entry a correction fixes / the direction a proposal answers / the proposal a verdict judges)."
     )]
     #[serde(default)]
     pub reply_to: Option<String>,
+
+    #[schemars(
+        description = "REQUIRED for kind=verdict, forbidden otherwise: success | failure. Drives automatic roster personnel actions (the judged proposal's author is promoted or eliminated)."
+    )]
+    #[serde(default)]
+    pub outcome: Option<VerdictOutcome>,
 }
 
 /// Post an entry to the shared blackboard.
@@ -398,6 +436,35 @@ impl xai_tool_runtime::Tool for BoardPostTool {
                 "Entry body must not be empty".to_string(),
             ));
         }
+        match input.kind {
+            EntryKind::Verdict => {
+                if input.outcome.is_none() {
+                    return Err(xai_tool_runtime::ToolError::invalid_arguments(
+                        "A verdict requires an explicit outcome (success | failure) — it drives \
+                         automatic personnel actions and is never inferred from prose."
+                            .to_string(),
+                    ));
+                }
+                if input.reply_to.is_none() {
+                    return Err(xai_tool_runtime::ToolError::invalid_arguments(
+                        "A verdict must set replyTo to the proposal it judges.".to_string(),
+                    ));
+                }
+            }
+            EntryKind::Proposal => {
+                if input.reply_to.is_none() {
+                    return Err(xai_tool_runtime::ToolError::invalid_arguments(
+                        "A proposal must set replyTo to the direction it answers.".to_string(),
+                    ));
+                }
+            }
+            _ if input.outcome.is_some() => {
+                return Err(xai_tool_runtime::ToolError::invalid_arguments(
+                    "outcome is only valid on kind=verdict.".to_string(),
+                ));
+            }
+            _ => {}
+        }
 
         let (cfg, cwd) = {
             let res = resources.lock().await;
@@ -437,8 +504,12 @@ impl xai_tool_runtime::Tool for BoardPostTool {
                 .filter(|e| !e.trim().is_empty())
                 .collect(),
             reply_to: input.reply_to,
+            outcome: input.outcome,
         };
         let entry_id = entry.id.clone();
+        let verdict_reply_to = matches!(entry.kind, EntryKind::Verdict)
+            .then(|| entry.reply_to.clone())
+            .flatten();
 
         append_entry(cfg.path.clone(), entry).await.map_err(|e| {
             xai_tool_runtime::ToolError::custom(
@@ -449,15 +520,60 @@ impl xai_tool_runtime::Tool for BoardPostTool {
 
         // Posting counts as having seen your own entry: advance the cursor
         // past the end so the digest never echoes an agent's own post back.
+        let entries = read_entries(cfg.path.clone()).await.unwrap_or_default();
         {
-            let entries = read_entries(cfg.path.clone()).await.unwrap_or_default();
             let mut res = resources.lock().await;
             let cursor = res.get_or_default::<State<BoardCursor>>();
             cursor.0.seen = entries.len() as u64;
         }
 
+        // Mechanical personnel action: a verdict on a proposal promotes or
+        // eliminates the proposal's author on the roster. Reality decides —
+        // no agent gets to vote on the consequence.
+        let mut personnel_note = String::new();
+        if let Some(proposal_id) = verdict_reply_to {
+            let roster_path = {
+                let res = resources.lock().await;
+                res.get::<super::roster::RosterCfg>().map(|c| c.path.clone())
+            };
+            if let Some(roster_path) = roster_path
+                && let Some(proposal) = entries
+                    .iter()
+                    .find(|e| e.id == proposal_id && e.kind == EntryKind::Proposal)
+            {
+                let won = input.outcome == Some(VerdictOutcome::Success);
+                let author = proposal.author.clone();
+                let direction = proposal.topic.clone();
+                let vid = entry_id.clone();
+                let action = tokio::task::spawn_blocking(move || {
+                    super::roster::apply_verdict(&roster_path, &author, won, &direction, &vid)
+                })
+                .await
+                .map_err(|e| xai_tool_runtime::ToolError::custom("board_post", e.to_string()))?
+                .map_err(|e| {
+                    xai_tool_runtime::ToolError::custom(
+                        "board_post",
+                        format!("verdict recorded but roster update failed: {e}"),
+                    )
+                })?;
+                use super::roster::PersonnelAction;
+                personnel_note = match action {
+                    PersonnelAction::Promoted { name, new_rank } => format!(
+                        "\nPersonnel: {name} promoted to rank {new_rank} (subagent quota now {}).",
+                        super::roster::subagent_quota_for_rank(new_rank)
+                    ),
+                    PersonnelAction::Eliminated { name } => format!(
+                        "\nPersonnel: {name} ELIMINATED from the roster (one strike). Post their \
+                         failure analysis as a finding, and refill the roster via roster_add by \
+                         mutating a winner's style."
+                    ),
+                    PersonnelAction::NoMatch => String::new(),
+                };
+            }
+        }
+
         Ok(ToolOutput::Text(
-            format!("Posted to blackboard (id: {entry_id}). Teammates will see it after their next tool call.").into(),
+            format!("Posted to blackboard (id: {entry_id}). Teammates will see it after their next tool call.{personnel_note}").into(),
         ))
     }
 }
@@ -826,6 +942,7 @@ mod tests {
             body: body.into(),
             evidence: evidence.iter().map(|s| s.to_string()).collect(),
             reply_to: None,
+            outcome: None,
         }
     }
 
@@ -1041,6 +1158,7 @@ mod tests {
             body: body.into(),
             evidence: vec![],
             reply_to: None,
+            outcome: None,
         }
     }
 
@@ -1211,6 +1329,7 @@ mod tests {
             body: "b".into(),
             evidence: vec![],
             reply_to: None,
+            outcome: None,
         };
         let mut content = serde_json::to_string(&good).unwrap();
         content.push('\n');

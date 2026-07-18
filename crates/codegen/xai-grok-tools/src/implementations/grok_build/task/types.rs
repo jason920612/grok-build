@@ -225,6 +225,8 @@ impl SubagentCapabilityModeExt for SubagentCapabilityMode {
                 // mutation — it survives every capability mode.
                 ToolKind::BoardRead,
                 ToolKind::BoardPost,
+                ToolKind::RosterList,
+                ToolKind::RosterAction,
             ],
             Self::ReadWrite => &[
                 ToolKind::Read,
@@ -256,6 +258,8 @@ impl SubagentCapabilityModeExt for SubagentCapabilityMode {
                 // mutation — it survives every capability mode.
                 ToolKind::BoardRead,
                 ToolKind::BoardPost,
+                ToolKind::RosterList,
+                ToolKind::RosterAction,
             ],
             Self::Execute => &[
                 ToolKind::Read,
@@ -280,6 +284,8 @@ impl SubagentCapabilityModeExt for SubagentCapabilityMode {
                 // mutation — it survives every capability mode.
                 ToolKind::BoardRead,
                 ToolKind::BoardPost,
+                ToolKind::RosterList,
+                ToolKind::RosterAction,
             ],
             Self::All => &[
                 ToolKind::Read,
@@ -312,6 +318,8 @@ impl SubagentCapabilityModeExt for SubagentCapabilityMode {
                 // mutation — it survives every capability mode.
                 ToolKind::BoardRead,
                 ToolKind::BoardPost,
+                ToolKind::RosterList,
+                ToolKind::RosterAction,
             ],
         }
     }

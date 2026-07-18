@@ -117,6 +117,10 @@ pub struct ToolContext {
     /// inherit the parent's value verbatim so grandchildren still post to
     /// the root's board.
     pub blackboard_path: Option<std::path::PathBuf>,
+    /// Roster persona this session runs as, when spawned with one. Names
+    /// the agent on the blackboard (`persona#prefix`) and gates its
+    /// subagent privileges by roster rank.
+    pub persona: Option<String>,
 }
 impl ToolContext {
     pub fn new(
@@ -157,6 +161,7 @@ impl ToolContext {
             goal_loop_active_gate: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             blocking_wait_depth: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             blackboard_path: None,
+            persona: None,
         }
     }
     pub fn with_preloaded_env(
@@ -194,6 +199,7 @@ impl ToolContext {
             goal_loop_active_gate: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             blocking_wait_depth: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             blackboard_path: None,
+            persona: None,
         }
     }
     pub fn with_file_state_handle(mut self, handle: FileStateHandle) -> Self {
@@ -251,6 +257,7 @@ mod tests {
                 goal_loop_active_gate: Arc::new(std::sync::atomic::AtomicBool::new(false)),
                 blocking_wait_depth: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
                 blackboard_path: None,
+                persona: None,
             }
         }
     }

@@ -105,6 +105,8 @@ pub(crate) const ALL_TOOL_KINDS: &[ToolKind] = &[
     ToolKind::GoalUpdate,
     ToolKind::BoardRead,
     ToolKind::BoardPost,
+    ToolKind::RosterList,
+    ToolKind::RosterAction,
     ToolKind::Other,
 ];
 
@@ -132,7 +134,7 @@ pub(crate) fn kind_allowed(mode: CapabilityMode, kind: ToolKind) -> bool {
         // state, not workspace mutation, so both directions stay available
         // in every mode.
         Plan | EnterPlan | ExitPlan | AskUser | Skill | SearchTool | GoalUpdate | BoardRead
-        | BoardPost => true,
+        | BoardPost | RosterList | RosterAction => true,
 
         // Read class.
         Read | MemoryGet | MemorySearch => {

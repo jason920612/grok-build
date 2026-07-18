@@ -583,7 +583,13 @@ pub(crate) async fn spawn_session_actor(
     } else {
         let id = session_info.id.0.to_string();
         let short = &id[..id.len().min(8)];
-        format!("{}#{}", agent_definition.name, short)
+        // Roster personas sign the board with their persona name so
+        // verdicts on their proposals resolve to their roster record.
+        let identity = tool_context
+            .persona
+            .as_deref()
+            .unwrap_or(&agent_definition.name);
+        format!("{identity}#{short}")
     };
     let initial_agent_type = Some(agent_definition.name.clone());
     let harness_metrics = if telemetry_enabled || xai_grok_telemetry::external::is_active() {

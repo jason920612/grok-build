@@ -1089,6 +1089,12 @@ impl AgentBuilder {
                 path: board_path,
                 author,
             });
+            // Personnel roster: workspace-scoped (not session-scoped) so
+            // track records persist across sessions — verdicts drive
+            // promotions and eliminations mechanically.
+            resources.insert(xai_grok_tools::implementations::grok_build::RosterCfg {
+                path: self.working_directory.join(".grok").join("roster.json"),
+            });
         }
         if let Some(names) = self.persisted_announced_skill_names {
             tool_bridge.restore_announced_skill_names(names).await;
