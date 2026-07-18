@@ -38,12 +38,13 @@ pub(super) fn plan_image_preview(
     protocol: GraphicsProtocol,
 ) -> ImagePreviewPlan<'_> {
     // Without a graphics protocol the image is drawn from text cells
-    // (half blocks) instead of pixel escapes — that path needs the
-    // in-memory encoded bytes and gets the same tall pixel-box geometry.
+    // (half blocks) instead of pixel escapes — that path needs encoded
+    // bytes either in memory or on the session path (post-persist) and
+    // gets the same tall pixel-box geometry.
     let show_pixels = if protocol.supports_images() {
         image.preview.prepared().is_some()
     } else {
-        image.encoded_bytes.is_some()
+        image.encoded_bytes.is_some() || image.session_image_path.is_some()
     };
     ImagePreviewPlan {
         show_pixels,

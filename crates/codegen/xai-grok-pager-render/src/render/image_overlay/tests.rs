@@ -211,3 +211,99 @@ fn formatting_helpers_cover_known_and_unknown_values() {
     assert_eq!(format_bytes(1536), "1.5 KB");
     assert_eq!(format_bytes(2_500_000), "2.4 MB");
 }
+
+/// Encode a tiny RGBA image as PNG bytes (real decodable PNG — not the
+/// bare 8-byte signature from [`png_header`], which half-block cannot decode).
+fn real_png_2x2() -> Vec<u8> {
+    let mut img = image::RgbaImage::new(2, 2);
+    img.put_pixel(0, 0, image::Rgba([255, 0, 0, 255]));
+    img.put_pixel(1, 0, image::Rgba([0, 255, 0, 255]));
+    img.put_pixel(0, 1, image::Rgba([0, 0, 255, 255]));
+    img.put_pixel(1, 1, image::Rgba([255, 255, 0, 255]));
+    let mut out = std::io::Cursor::new(Vec::new());
+    img.write_to(&mut out, image::ImageFormat::Png).unwrap();
+    out.into_inner()
+}
+
+fn sample_image_with_real_png() -> PastedImage {
+    let png = real_png_2x2();
+    let byte_len = png.len();
+    PastedImage {
+        element_id: xai_ratatui_textarea::ElementId::from_raw(1),
+        display_number: 1,
+        mime_type: "image/png".into(),
+        dimensions: Some((2, 2)),
+        byte_len,
+        encoded_bytes: Some(png.into()),
+        source_path: None,
+        staged_temp_path: None,
+        session_image_path: None,
+        preview: Default::default(),
+    }
+}
+
+/// After `persist_to_session` clears `encoded_bytes`, half-block hover must
+/// still draw from `session_image_path` under `GraphicsProtocol::None`.
+#[test]
+fn halfblock_hover_still_draws_after_persist_to_session() {
+    let _guard = set_protocol_for_test(GraphicsProtocol::None);
+    let mut image = sample_image_with_real_png();
+    let area = Rect::new(0, 0, 60, 20);
+
+    // Pre-persist: half-block pixel path with in-memory bytes.
+    let (render_pre, text_pre) = render_to_string(&image, area);
+    let render_pre = render_pre.expect("pre-persist overlay should render");
+    assert!(
+        render_pre.image_placement.is_some(),
+        "pre-persist should use pixel-box geometry"
+    );
+    assert!(
+        text_pre.contains('\u{2580}'),
+        "pre-persist should draw half-block cells, got: {text_pre:?}"
+    );
+    assert!(
+        !text_pre.contains("Format: PNG"),
+        "pre-persist must not fall back to metadata box, got: {text_pre:?}"
+    );
+
+    let dir = tempfile::tempdir().unwrap();
+    crate::prompt_images::persist_to_session(&mut image, dir.path()).unwrap();
+    assert!(
+        image.encoded_bytes.is_none(),
+        "persist must clear encoded_bytes"
+    );
+    assert!(
+        image.session_image_path.is_some(),
+        "persist must set session_image_path"
+    );
+
+    // Post-persist: same half-block path via dual-source (session file).
+    let (render_post, text_post) = render_to_string(&image, area);
+    let render_post = render_post.expect("post-persist overlay should render");
+    assert!(
+        render_post.image_placement.is_some(),
+        "post-persist should still use pixel-box geometry"
+    );
+    assert!(
+        text_post.contains('\u{2580}'),
+        "post-persist should still draw half-block cells, got: {text_post:?}"
+    );
+    assert!(
+        !text_post.contains("Format: PNG"),
+        "post-persist must not fall back to metadata box, got: {text_post:?}"
+    );
+}
+
+/// Plan gate: session path alone is enough for half-block pixel geometry
+/// under no graphics protocol (mirrors post-persist shape).
+#[test]
+fn plan_show_pixels_true_when_only_session_image_path_under_none() {
+    let mut image = sample_image(None, false);
+    image.session_image_path = Some(PathBuf::from("/tmp/session/image-uuid.png"));
+    image.dimensions = Some((640, 480));
+    let plan = plan_image_preview(&image, GraphicsProtocol::None);
+    assert!(
+        plan.show_pixels,
+        "session_image_path alone must enable show_pixels under GraphicsProtocol::None"
+    );
+}

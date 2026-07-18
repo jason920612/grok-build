@@ -88,11 +88,15 @@ static PREVIEW_CACHE: std::sync::Mutex<Option<(u64, u16, u16, Vec<Line<'static>>
 /// [`render_halfblock_lines`] with a single-entry cache keyed by
 /// `(identity, cols, rows)`. For draw-loop call sites that hold only a
 /// shared reference to their image state.
+///
+/// `load_bytes` is invoked only on a cache miss so callers can resolve
+/// dual-source bytes (in-memory or session file) without re-reading disk
+/// every frame when the preview identity and cell size are unchanged.
 pub fn render_halfblock_cached(
     identity: u64,
-    bytes: &[u8],
     cols: u16,
     rows: u16,
+    load_bytes: impl FnOnce() -> Option<Vec<u8>>,
 ) -> Option<Vec<Line<'static>>> {
     let mut slot = PREVIEW_CACHE.lock().ok()?;
     if let Some((id, c, r, lines)) = slot.as_ref()
@@ -102,7 +106,8 @@ pub fn render_halfblock_cached(
     {
         return Some(lines.clone());
     }
-    let lines = render_halfblock_lines(bytes, cols, rows)?;
+    let bytes = load_bytes()?;
+    let lines = render_halfblock_lines(&bytes, cols, rows)?;
     *slot = Some((identity, cols, rows, lines.clone()));
     Some(lines)
 }

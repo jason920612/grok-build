@@ -188,14 +188,24 @@ fn render_image_overlay_inner(
 
     // Text-cell rendering path: no graphics protocol, draw the image out
     // of half blocks directly into the buffer. No escapes involved.
+    // Bytes are dual-sourced like ImageViewerState::open / load_for_send:
+    // prefer in-memory encoded_bytes, else session_image_path on disk.
+    // load_bytes runs only on half-block cache miss (identity/cols/rows).
     if !protocol.supports_images() {
-        if let (Some(placement), Some(bytes)) =
-            (geometry.image_placement, image.encoded_bytes.as_ref())
+        if let Some(placement) = geometry.image_placement
             && let Some(lines) = crate::halfblock::render_halfblock_cached(
                 image.preview.identity(),
-                bytes,
                 placement.cols,
                 placement.rows,
+                || {
+                    if let Some(bytes) = image.encoded_bytes.as_ref() {
+                        Some(bytes.to_vec())
+                    } else if let Some(path) = image.session_image_path.as_ref() {
+                        std::fs::read(path).ok()
+                    } else {
+                        None
+                    }
+                },
             )
         {
             let block_h = (lines.len() as u16).min(placement.rows);
