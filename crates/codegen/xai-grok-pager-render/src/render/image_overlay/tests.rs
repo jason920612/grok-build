@@ -67,14 +67,24 @@ fn plan_covers_pixels_by_path_matrix() {
             Some(Path::new("/tmp/logo.png")),
         ),
         (GraphicsProtocol::Kitty, None, true, true, None),
+        // Without a graphics protocol the half-block text renderer takes
+        // the pixel-box path whenever the encoded bytes are in memory.
         (
             GraphicsProtocol::None,
             Some("/tmp/logo.png"),
             true,
+            true,
+            Some(Path::new("/tmp/logo.png")),
+        ),
+        (GraphicsProtocol::None, None, true, true, None),
+        (
+            GraphicsProtocol::None,
+            Some("/tmp/logo.png"),
+            false,
             false,
             Some(Path::new("/tmp/logo.png")),
         ),
-        (GraphicsProtocol::None, None, true, false, None),
+        (GraphicsProtocol::None, None, false, false, None),
     ] {
         let image = sample_image(path, pixels);
         let plan = plan_image_preview(&image, protocol);
@@ -136,9 +146,11 @@ fn paint_pixels_without_path_has_no_footer() {
 
 #[test]
 fn paint_metadata_with_path_shows_all_fields() {
+    // Metadata box renders when no pixel path exists: protocol None AND
+    // no in-memory bytes (with bytes, the half-block renderer takes over).
     let _guard = set_protocol_for_test(GraphicsProtocol::None);
     let (render, text) = render_to_string(
-        &sample_image(Some("/tmp/logo.png"), true),
+        &sample_image(Some("/tmp/logo.png"), false),
         Rect::new(0, 0, 60, 20),
     );
     assert!(render.unwrap().image_placement.is_none());

@@ -16,6 +16,7 @@ pub mod image;
 pub mod keyboard;
 pub mod overlay;
 pub(crate) mod probe;
+pub mod sixel;
 pub mod xtversion;
 
 pub use embedded_editor::{EmbeddedEditor, embedded_editor_from_env};

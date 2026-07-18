@@ -191,7 +191,9 @@ pub fn volatile_centered(
 pub fn clear() -> Option<Escapes> {
     match detect_graphics_protocol() {
         GraphicsProtocol::Kitty => Some(clear_kitty()),
-        GraphicsProtocol::ITerm2 | GraphicsProtocol::None => None,
+        // iTerm2/sixel pixels live in the cell grid: overwritten by the
+        // next text redraw, nothing to clear explicitly.
+        GraphicsProtocol::ITerm2 | GraphicsProtocol::Sixel | GraphicsProtocol::None => None,
     }
 }
 

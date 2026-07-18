@@ -50,7 +50,7 @@ pub fn render_halfblock_lines(
     let scale = f64::min(max_px_w as f64 / w as f64, max_px_h as f64 / h as f64);
     let out_w = ((w as f64 * scale).round() as u32).clamp(1, max_px_w);
     let out_h = ((h as f64 * scale).round() as u32).clamp(1, max_px_h);
-    let resized = img.resize_exact(out_w, out_h, FilterType::Triangle).to_rgba8();
+    let resized = img.resize_exact(out_w, out_h, FilterType::Lanczos3).to_rgba8();
 
     let rows = out_h.div_ceil(2);
     let mut lines = Vec::with_capacity(rows as usize);

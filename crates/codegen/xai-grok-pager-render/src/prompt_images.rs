@@ -326,11 +326,14 @@ impl VideoViewerState {
         let (width, height, duration, fps) = ffprobe_metadata(path)?;
         let target_fps = VIDEO_FPS.min(fps);
 
-        // PNG for Kitty (required), JPEG for iTerm2 (smaller).
+        // PNG for Kitty (required), JPEG for iTerm2 (smaller). Sixel
+        // re-encodes every frame as a full escape sequence — too heavy
+        // for 10fps playback, so video stays on the poster/affordance
+        // path there.
         let ext = match protocol {
             GraphicsProtocol::Kitty => "png",
             GraphicsProtocol::ITerm2 => "jpg",
-            GraphicsProtocol::None => return None,
+            GraphicsProtocol::Sixel | GraphicsProtocol::None => return None,
         };
 
         let vf = if width > VIDEO_MAX_WIDTH {
@@ -453,7 +456,7 @@ pub fn extract_poster_frame(path: &std::path::Path) -> Option<(Vec<u8>, u32, u32
 
     let protocol = detect_graphics_protocol();
     let ext = match protocol {
-        GraphicsProtocol::Kitty => "png",
+        GraphicsProtocol::Kitty | GraphicsProtocol::Sixel => "png",
         GraphicsProtocol::ITerm2 => "jpg",
         GraphicsProtocol::None => return None,
     };
@@ -784,7 +787,10 @@ impl PromptImagePreviewPreparation {
                     };
                 PromptImagePreviewResult::Ready { bytes, dimensions }
             }
-            crate::terminal::image::GraphicsProtocol::ITerm2 => PromptImagePreviewResult::Ready {
+            // iTerm2 and sixel both consume the source bytes as-is at
+            // render time (the sixel encoder decodes them itself).
+            crate::terminal::image::GraphicsProtocol::ITerm2
+            | crate::terminal::image::GraphicsProtocol::Sixel => PromptImagePreviewResult::Ready {
                 bytes: self.source,
                 dimensions,
             },

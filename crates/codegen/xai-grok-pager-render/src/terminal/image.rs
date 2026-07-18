@@ -38,6 +38,8 @@ pub enum GraphicsProtocol {
     Kitty,
     /// iTerm2 inline images protocol.
     ITerm2,
+    /// DEC sixel graphics (Windows Terminal ≥ 1.22, xterm, foot, mlterm).
+    Sixel,
     /// No graphics protocol available — text fallback only.
     #[default]
     None,
@@ -94,8 +96,30 @@ pub fn detect_graphics_protocol() -> GraphicsProtocol {
         if ctx.graphics_protocol_skip_reason().is_some() {
             return GraphicsProtocol::None;
         }
-        protocol_for_brand(ctx.brand, cfg!(target_os = "windows"))
+        let brand_protocol = protocol_for_brand(ctx.brand, cfg!(target_os = "windows"));
+        if brand_protocol == GraphicsProtocol::None && sixel_supported_by_env() {
+            return GraphicsProtocol::Sixel;
+        }
+        brand_protocol
     })
+}
+
+/// Whether the hosting terminal supports sixel graphics, judged from the
+/// environment: `GROK_SIXEL=1/0` overrides; otherwise `WT_SESSION`
+/// (Windows Terminal, sixel since 1.22 — propagated into WSL sessions)
+/// or a `TERM` containing "sixel" opt in.
+fn sixel_supported_by_env() -> bool {
+    match std::env::var("GROK_SIXEL").ok().as_deref() {
+        Some("0") | Some("off") | Some("false") => return false,
+        Some("1") | Some("on") | Some("true") => return true,
+        _ => {}
+    }
+    if std::env::var_os("WT_SESSION").is_some() {
+        return true;
+    }
+    std::env::var("TERM")
+        .map(|t| t.contains("sixel"))
+        .unwrap_or(false)
 }
 
 /// Whether the current terminal can safely host scrollback inline-media
@@ -318,7 +342,8 @@ fn convert_via_sips(image_data: &[u8]) -> Option<Vec<u8>> {
 pub fn prepare_overlay_image_bytes(image_data: &[u8]) -> Option<Vec<u8>> {
     match detect_graphics_protocol() {
         GraphicsProtocol::Kitty => prepare_kitty_overlay_image_bytes(image_data),
-        GraphicsProtocol::ITerm2 => Some(image_data.to_vec()),
+        // Sixel decodes the source bytes itself at render time.
+        GraphicsProtocol::ITerm2 | GraphicsProtocol::Sixel => Some(image_data.to_vec()),
         GraphicsProtocol::None => None,
     }
 }
@@ -514,6 +539,14 @@ pub(super) fn build_overlay_image_escapes_for_protocol(
                 esc.push_str(&render_iterm2_image(image_data, cols, rows));
             }
         }
+        GraphicsProtocol::Sixel => {
+            // Like iTerm2: full data only on retransmit. Sixel pixels live
+            // in the cell grid, so an owner-unchanged frame emits nothing
+            // and the terminal keeps showing the previous placement.
+            if retransmit {
+                esc.push_str(&super::sixel::render_sixel_image(image_data, cols, rows)?);
+            }
+        }
         GraphicsProtocol::None => unreachable!(),
     }
     Some(esc)
@@ -529,6 +562,9 @@ pub fn transmit_inline_image(image_data: &[u8], image_id: u32) -> Option<String>
             Some(transmit_kitty_image(image_data, format, image_id))
         }
         GraphicsProtocol::ITerm2 => Some(String::new()),
+        // Scrollback inline media needs image-id placement/cropping that
+        // sixel doesn't have; the affordance text path is used instead.
+        GraphicsProtocol::Sixel => None,
         GraphicsProtocol::None => None,
     }
 }
@@ -596,6 +632,8 @@ pub fn place_inline_image(
                 esc.push_str(&render_iterm2_image(image_data, fit_cols, area.height));
             }
         }
+        // Not part of the scrollback inline path (see transmit_inline_image).
+        GraphicsProtocol::Sixel => return None,
         GraphicsProtocol::None => unreachable!(),
     }
     Some(esc)
