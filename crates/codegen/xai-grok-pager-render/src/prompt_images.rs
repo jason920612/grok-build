@@ -970,11 +970,64 @@ fn token_to_path(token: &str) -> Option<PathBuf> {
         if url.scheme() != "file" {
             return None;
         }
-        return url.to_file_path().ok();
+        return url.to_file_path().ok().map(resolve_windows_drive_on_unix);
     }
 
     let unescaped = shell_unescape(unquoted);
-    Some(PathBuf::from(unescaped.into_owned()))
+    Some(resolve_windows_drive_on_unix(PathBuf::from(
+        unescaped.into_owned(),
+    )))
+}
+
+/// Map a Windows drive path string to its WSL `/mnt/<drive>/…` form.
+///
+/// Accepts both the bare shapes (`C:\Users\…`, `C:/Users/…`) and the
+/// `/C:/Users/…` shape that `file:///C:/…` URLs decode to on Unix.
+/// Pure string mapping — the existence gate lives in
+/// [`resolve_windows_drive_on_unix`].
+#[cfg(not(windows))]
+fn windows_drive_to_mnt(s: &str) -> Option<String> {
+    let b = s.as_bytes();
+    let (drive, rest) = if b.len() >= 3
+        && b[0].is_ascii_alphabetic()
+        && b[1] == b':'
+        && (b[2] == b'\\' || b[2] == b'/')
+    {
+        (b[0], &s[3..])
+    } else if b.len() >= 4 && b[0] == b'/' && b[1].is_ascii_alphabetic() && b[2] == b':' && b[3] == b'/'
+    {
+        (b[1], &s[4..])
+    } else {
+        return None;
+    };
+    Some(format!(
+        "/mnt/{}/{}",
+        (drive as char).to_ascii_lowercase(),
+        rest.replace('\\', "/")
+    ))
+}
+
+/// On Unix hosts, a drag-and-drop from the Windows side of a WSL setup
+/// pastes a *Windows* path (`"C:\Users\…\shot.png"`) that does not exist
+/// in the Linux filesystem — the file lives under `/mnt/c/…`. When the
+/// dropped path is drive-shaped, doesn't exist as-is, and its `/mnt/…`
+/// translation does exist, resolve to the translation. No-op on Windows
+/// hosts and on plain Linux (no `/mnt/<drive>` mounts).
+#[cfg(not(windows))]
+fn resolve_windows_drive_on_unix(path: PathBuf) -> PathBuf {
+    if path.exists() {
+        return path;
+    }
+    let Some(s) = path.to_str() else { return path };
+    match windows_drive_to_mnt(s) {
+        Some(mnt) if std::path::Path::new(&mnt).exists() => PathBuf::from(mnt),
+        _ => path,
+    }
+}
+
+#[cfg(windows)]
+fn resolve_windows_drive_on_unix(path: PathBuf) -> PathBuf {
+    path
 }
 
 /// Validate that `path` points to a readable image file and load it as
@@ -2231,6 +2284,26 @@ mod tests {
         assert!(!looks_like_windows_path("C:foo"));
         assert!(!looks_like_windows_path(r"\foo"));
         assert!(!looks_like_windows_path(""));
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn windows_drive_maps_to_wsl_mnt() {
+        assert_eq!(
+            windows_drive_to_mnt(r"C:\Users\jason\Pictures\螢幕擷取畫面 1.png").as_deref(),
+            Some("/mnt/c/Users/jason/Pictures/螢幕擷取畫面 1.png")
+        );
+        assert_eq!(
+            windows_drive_to_mnt("D:/data/img.png").as_deref(),
+            Some("/mnt/d/data/img.png")
+        );
+        // `file:///C:/…` decodes to `/C:/…` on Unix.
+        assert_eq!(
+            windows_drive_to_mnt("/C:/Users/x.png").as_deref(),
+            Some("/mnt/c/Users/x.png")
+        );
+        assert!(windows_drive_to_mnt("/home/jason/x.png").is_none());
+        assert!(windows_drive_to_mnt("relative.png").is_none());
     }
 
     #[test]
