@@ -170,7 +170,7 @@ impl xai_tool_runtime::Tool for WaitTasksTool {
 
         // wait_any: keep legacy event-driven path (not exposed on get_task_output).
         let goal_active =
-            crate::implementations::grok_build::task_output::goal_loop_active(&resources).await;
+            crate::implementations::grok_build::task_output::goal_cap_applies(&resources).await;
         let (timeout, goal_capped) =
             crate::implementations::grok_build::task_output::goal_capped_wait_timeout(
                 input.timeout_ms,

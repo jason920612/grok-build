@@ -66,6 +66,17 @@ pub(crate) async fn goal_loop_active(resources: &SharedResources) -> bool {
         .is_some_and(|g| g.0)
 }
 
+/// Whether the goal-mode block cap applies to this wait: goal loop active
+/// AND no declared waiting phase on the mission map. A declared wait buys
+/// quiet blocking — the cap exists to teach undeclared camping, not to
+/// interrupt an agent that already told the map what it waits on (each
+/// cap-expiry wake is a full-context model call; the blocked call itself
+/// costs nothing).
+pub(crate) async fn goal_cap_applies(resources: &SharedResources) -> bool {
+    goal_loop_active(resources).await
+        && !crate::implementations::grok_build::compass::declared_waiting(resources).await
+}
+
 /// Goal-aware variant of [`capped_wait_timeout`]: while the goal loop is
 /// active (guardrail `goal_block_cap`), a blocking wait clamps to
 /// [`crate::guardrails::GOAL_WAIT_BLOCK_CAP`] so the agent cannot camp the
@@ -87,13 +98,15 @@ pub(crate) fn goal_capped_wait_timeout(
 }
 
 /// Instruction appended to still-pending wait results when the goal-mode cap
-/// truncated the requested wait.
+/// truncated the requested wait. Phrased as a trade, not a scolding: a wait
+/// declared on the mission map is exempt from the cap, so declaring is the
+/// natural way to wait without interruption.
 pub(crate) fn goal_wait_cap_note() -> String {
     format!(
-        "\n\n[goal mode] This blocking wait was capped at {}s because a goal loop is active. \
-         Do not call this tool again just to keep waiting — record what you're waiting for with \
-         update_goal(waiting_on: ...) and end your turn; task completion will wake you \
-         automatically.",
+        "\n\n[goal mode] This blocking wait was capped at {}s because no wait is declared. \
+         To wait without interruption, declare it first — map_update(status: waiting, note: \
+         what you wait on) or update_goal(waiting_on: ...) — then a single blocking call runs \
+         to its full timeout, and task completion wakes you automatically either way.",
         crate::guardrails::GOAL_WAIT_BLOCK_CAP.as_secs()
     )
 }
@@ -163,7 +176,7 @@ impl TaskOutputTool {
         }
 
         let waits = xai_tool_types::task_output_waits(timeout_ms);
-        let goal_active = waits && goal_loop_active(&resources).await;
+        let goal_active = waits && goal_cap_applies(&resources).await;
         let mut goal_capped = false;
         let snapshot = if waits {
             // Cap the blocking wait so a large `timeout_ms` can't wedge the turn;
@@ -263,7 +276,7 @@ impl TaskOutputTool {
         tool_name_for_truncation: &str,
     ) -> Result<TaskOutputOutput, xai_tool_runtime::ToolError> {
         let waits = xai_tool_types::task_output_waits(timeout_ms);
-        let goal_active = waits && goal_loop_active(&resources).await;
+        let goal_active = waits && goal_cap_applies(&resources).await;
         let (timeout, goal_capped) = goal_capped_wait_timeout(timeout_ms, goal_active);
 
         let (terminal, backend, read_file_name, max_output_bytes) = {
@@ -1008,6 +1021,51 @@ mod tests {
         assert_eq!(capped_wait_timeout(Some(36_000_000)), MAX_WAIT_BLOCK);
         // Exactly at the cap (10m) -> unchanged.
         assert_eq!(capped_wait_timeout(Some(600_000)), MAX_WAIT_BLOCK);
+    }
+
+    // A wait DECLARED on the mission map is exempt from the goal block cap:
+    // the cap teaches undeclared camping, and interrupting a declared wait
+    // every 60s only burns full-context wakes for nothing.
+    #[tokio::test]
+    async fn declared_wait_exempts_goal_cap() {
+        use crate::implementations::grok_build::blackboard::BlackboardCfg;
+        use crate::implementations::grok_build::task::types::GoalLoopActive;
+        let tmp = tempfile::tempdir().unwrap();
+        let mut res = crate::types::resources::Resources::new();
+        res.insert(GoalLoopActive(true));
+        res.insert(BlackboardCfg {
+            path: tmp.path().join("blackboard.jsonl"),
+            author: "main".to_string(),
+        });
+        let shared = res.into_shared();
+        // No mission map at all -> the cap applies.
+        assert!(goal_cap_applies(&shared).await);
+        // Mission with a declared waiting phase -> exempt.
+        std::fs::write(
+            tmp.path().join("mission.json"),
+            serde_json::json!({
+                "north_star": "x", "why": "y",
+                "phases": [{"title": "collect", "status": "waiting", "note": "cron"}],
+                "created_ts": "2026-01-01T00:00:00Z",
+                "updated_ts": "2026-01-01T00:00:00Z"
+            })
+            .to_string(),
+        )
+        .unwrap();
+        assert!(!goal_cap_applies(&shared).await);
+        // Phase moves on (active, not waiting) -> the cap applies again.
+        std::fs::write(
+            tmp.path().join("mission.json"),
+            serde_json::json!({
+                "north_star": "x", "why": "y",
+                "phases": [{"title": "analyze", "status": "active"}],
+                "created_ts": "2026-01-01T00:00:00Z",
+                "updated_ts": "2026-01-01T00:00:00Z"
+            })
+            .to_string(),
+        )
+        .unwrap();
+        assert!(goal_cap_applies(&shared).await);
     }
 
     // While the goal loop is active the block cap tightens to

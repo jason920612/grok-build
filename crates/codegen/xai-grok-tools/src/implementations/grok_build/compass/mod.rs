@@ -258,6 +258,22 @@ fn render_mission(mission: &Mission, idea_count: usize) -> String {
     out
 }
 
+/// Whether the mission map currently declares a waiting phase.
+///
+/// A DECLARED wait buys quiet blocking: the goal-mode block cap exists only
+/// to teach undeclared camping, so once the agent has told the map what it
+/// waits on, blocking retrievals are left uninterrupted (blocked tool calls
+/// cost zero tokens — the waste was the cap waking the model every minute).
+/// Best-effort: read failures count as not waiting.
+pub async fn declared_waiting(resources: &crate::types::resources::SharedResources) -> bool {
+    let path = {
+        let res = resources.lock().await;
+        mission_path(&res)
+    };
+    let Some(path) = path else { return false };
+    matches!(read_mission(path).await, Ok(Some(m)) if m.is_waiting())
+}
+
 /// Count idea-box entries on the shared board (best-effort; 0 on error).
 async fn idea_count(res: &crate::types::resources::SharedResources) -> usize {
     let path = {
