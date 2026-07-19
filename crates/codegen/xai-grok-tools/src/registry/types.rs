@@ -2194,6 +2194,69 @@ mod tests {
             system_reminder_tag: crate::reminders::DEFAULT_REMINDER_TAG,
         }
     }
+    /// The orientation nudge must reach the model through the REAL dispatch
+    /// path (call → check_verify_gate seq counting → finalize_output
+    /// reminders), not just when the reminder is invoked directly.
+    #[tokio::test]
+    async fn orientation_nudge_fires_through_real_dispatch() {
+        let tmp = TempDir::new().unwrap();
+        std::fs::write(tmp.path().join("f.txt"), "hello\n").unwrap();
+        let builder = ToolRegistryBuilder::new();
+        let config = ToolServerConfig {
+            tools: vec![
+                ToolConfig {
+                    id: "GrokBuild:read_file".to_string(),
+                    params: None,
+                    name_override: None,
+                    params_name_overrides: None,
+                    description_override: None,
+                    behavior_version: None,
+                    kind: None,
+                },
+                // The nudge only targets agents whose toolset can create a
+                // map, so map_update must be in the finalized config.
+                ToolConfig {
+                    id: "GrokBuild:map_update".to_string(),
+                    params: None,
+                    name_override: None,
+                    params_name_overrides: None,
+                    description_override: None,
+                    behavior_version: None,
+                    kind: None,
+                },
+            ],
+            behavior_preset: None,
+        };
+        let ctx = test_session_context(&tmp);
+        let toolset = Arc::new(builder.finalize(config, ctx).expect("finalize"));
+        {
+            let mut res = toolset.resources.lock().await;
+            res.insert(crate::implementations::grok_build::blackboard::BlackboardCfg {
+                path: tmp.path().join("blackboard.jsonl"),
+                author: "main".to_string(),
+            });
+        }
+        let mut saw_nudge = false;
+        for i in 0..15 {
+            let r = toolset
+                .call(
+                    "read_file",
+                    serde_json::json!({"target_file": "f.txt"}),
+                    &format!("orient-{i}"),
+                    None,
+                )
+                .await
+                .expect("read_file call");
+            if r.prompt_text.contains("No mission map") {
+                saw_nudge = true;
+            }
+        }
+        assert!(
+            saw_nudge,
+            "orientation nudge never fired across 15 real dispatch calls"
+        );
+    }
+
     /// Regression test: `kind_params` must merge input params from ALL tools
     /// that share a `ToolKind`, not just the first one.
     ///

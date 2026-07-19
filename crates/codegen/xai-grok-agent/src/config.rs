@@ -284,6 +284,8 @@ fn default_grok_build_toolset() -> ToolServerConfig {
             (&grok_build::BoardPostTool).into(),
             (&grok_build::RosterListTool).into(),
             (&grok_build::RosterAddTool).into(),
+            (&grok_build::MapUpdateTool).into(),
+            (&grok_build::MapReadTool).into(),
         ],
         behavior_preset: None,
     }
@@ -337,6 +339,8 @@ pub fn grok_build_hashline_toolset(
         (&grok_build::BoardPostTool).into(),
         (&grok_build::RosterListTool).into(),
         (&grok_build::RosterAddTool).into(),
+        (&grok_build::MapUpdateTool).into(),
+        (&grok_build::MapReadTool).into(),
     ]);
     ToolServerConfig {
         tools,
@@ -380,6 +384,8 @@ fn explore_toolset() -> ToolServerConfig {
             (&grok_build::BoardPostTool).into(),
             (&grok_build::RosterListTool).into(),
             (&grok_build::RosterAddTool).into(),
+            (&grok_build::MapUpdateTool).into(),
+            (&grok_build::MapReadTool).into(),
         ],
         behavior_preset: None,
     }
@@ -400,6 +406,8 @@ fn plan_toolset() -> ToolServerConfig {
             (&grok_build::BoardPostTool).into(),
             (&grok_build::RosterListTool).into(),
             (&grok_build::RosterAddTool).into(),
+            (&grok_build::MapUpdateTool).into(),
+            (&grok_build::MapReadTool).into(),
         ],
         behavior_preset: None,
     }
@@ -436,6 +444,8 @@ fn grok_build_plan_toolset() -> ToolServerConfig {
             (&grok_build::BoardPostTool).into(),
             (&grok_build::RosterListTool).into(),
             (&grok_build::RosterAddTool).into(),
+            (&grok_build::MapUpdateTool).into(),
+            (&grok_build::MapReadTool).into(),
         ],
         behavior_preset: None,
     }
@@ -479,6 +489,8 @@ fn orchestrator_toolset() -> ToolServerConfig {
             (&grok_build::BoardPostTool).into(),
             (&grok_build::RosterListTool).into(),
             (&grok_build::RosterAddTool).into(),
+            (&grok_build::MapUpdateTool).into(),
+            (&grok_build::MapReadTool).into(),
         ],
         behavior_preset: None,
     }
@@ -513,6 +525,8 @@ fn grok_build_plan_no_subagents_toolset() -> ToolServerConfig {
             (&grok_build::BoardPostTool).into(),
             (&grok_build::RosterListTool).into(),
             (&grok_build::RosterAddTool).into(),
+            (&grok_build::MapUpdateTool).into(),
+            (&grok_build::MapReadTool).into(),
         ],
         behavior_preset: None,
     }
@@ -546,6 +560,8 @@ fn grok_build_ask_user_toolset() -> ToolServerConfig {
             (&grok_build::BoardPostTool).into(),
             (&grok_build::RosterListTool).into(),
             (&grok_build::RosterAddTool).into(),
+            (&grok_build::MapUpdateTool).into(),
+            (&grok_build::MapReadTool).into(),
         ],
         behavior_preset: None,
     }

@@ -27,6 +27,8 @@
 //! The map and orientation are permanent cognitive capability (strong
 //! models benefit too); only the stuck hard gate is a removable guardrail.
 
+pub mod incubation;
+
 use std::io::{Read as _, Write as _};
 use std::path::{Path, PathBuf};
 
@@ -587,6 +589,47 @@ impl xai_tool_runtime::Tool for MapUpdateTool {
                 )
             })?;
 
+        // A declared waiting phase is thinking time: fire the incubation
+        // agent (read-only, silent output). This trigger works outside goal
+        // mode too — the map, not the goal system, is the source of truth
+        // for "the session is legitimately parked".
+        if let Some((_, PhaseStatus::Waiting)) = phase_transition {
+            let (event_tx, session_id, prompt_id, cwd_str) = {
+                let res = resources.lock().await;
+                (
+                    res.get::<super::task::types::SubagentEventSender>()
+                        .map(|s| s.0.clone()),
+                    res.get::<super::task::types::SessionIdResource>()
+                        .map(|s| s.0.clone()),
+                    res.get::<super::task::types::CurrentPromptIdResource>()
+                        .map(|p| p.0.clone())
+                        .filter(|p| !p.is_empty()),
+                    res.get::<crate::types::resources::Cwd>()
+                        .map(|c| c.0.display().to_string()),
+                )
+            };
+            // The map carries no duration; assume a substantial wait — the
+            // rate limiter and min-wait gate still apply.
+            const ASSUMED_WAIT_SECS: u64 = 600;
+            if let (Some(event_tx), Some(session_id)) = (event_tx, session_id)
+                && incubation::should_incubate(&session_id, ASSUMED_WAIT_SECS)
+            {
+                let waiting_on = input
+                    .note
+                    .clone()
+                    .unwrap_or_else(|| "a declared waiting phase".to_string());
+                incubation::spawn_incubation(
+                    event_tx,
+                    session_id,
+                    prompt_id,
+                    cwd_str,
+                    waiting_on,
+                    ASSUMED_WAIT_SECS,
+                    Some(path.display().to_string()),
+                );
+            }
+        }
+
         // Phase transitions are the natural decision points where the silent
         // idea box surfaces.
         let ideas = if phase_transition.is_some() {
@@ -698,16 +741,26 @@ impl xai_tool_runtime::Tool for MapReadTool {
 
 // ── Orientation reminder ────────────────────────────────────────────────
 
-/// Throttle state for [`OrientationReminder`] (ephemeral, per agent).
-#[derive(Debug, Clone, Default)]
+/// Throttle state for [`OrientationReminder`].
+///
+/// Registered + persisted (survives harness rebuilds and session resume):
+/// the reminder counts its own invocations instead of depending on the
+/// ephemeral `EvidenceTimeline`, which resets whenever the shell rebuilds
+/// the toolset (e.g. the goal-harness swap) — an ephemeral counter never
+/// reached the emit threshold in real goal sessions.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct OrientationState {
-    /// `EvidenceTimeline.seq` at the last emitted orientation block.
-    pub last_emit_seq: u64,
+    /// Successful tool calls observed (this reminder runs once per call).
+    pub calls_seen: u64,
+    /// `calls_seen` at the last emitted orientation block.
+    pub last_emit_calls: u64,
     /// Unix seconds of the last emitted block.
     pub last_emit_unix: u64,
     /// Whether the one-time "no mission map" nudge fired.
     pub nudged_missing: bool,
 }
+
+crate::register_resource!("grok_build", "CompassOrientation", OrientationState);
 
 /// Emit an orientation block at most every this many tool calls…
 const ORIENT_EVERY_CALLS: u64 = 12;
@@ -741,25 +794,29 @@ impl Reminder for OrientationReminder {
         resources: crate::types::resources::SharedResources,
         _tool_output: &ToolOutput,
     ) -> Vec<String> {
-        let (path, seq, state) = {
+        use crate::types::resources::State;
+        let (path, state, has_map_update) = {
             let mut res = resources.lock().await;
             let Some(path) = mission_path(&res) else {
                 return vec![];
             };
-            let seq = res
-                .get::<super::blackboard::EvidenceTimeline>()
-                .map(|t| t.seq)
-                .unwrap_or(0);
-            let state = res.get_or_default::<OrientationState>().clone();
-            (path, seq, state)
+            let has_map_update = res
+                .get::<crate::types::template_renderer::TemplateRenderer>()
+                .is_some_and(|r| r.tool_for_kind(ToolKind::MapUpdate).is_some());
+            let st = res.get_or_default::<State<OrientationState>>();
+            st.0.calls_seen += 1;
+            (path, st.0.clone(), has_map_update)
         };
 
         let now = unix_now();
-        let due_by_calls = seq.saturating_sub(state.last_emit_seq) >= ORIENT_EVERY_CALLS;
+        let calls = state.calls_seen;
+        let due_by_calls = calls.saturating_sub(state.last_emit_calls) >= ORIENT_EVERY_CALLS;
         let due_by_time =
             state.last_emit_unix > 0 && now.saturating_sub(state.last_emit_unix) >= ORIENT_EVERY_SECS;
-        // First emission waits for the call threshold; afterwards time also counts.
-        if !due_by_calls && !due_by_time {
+        // The no-map nudge has its own earlier threshold; periodic blocks
+        // wait for the call/time throttle.
+        let nudge_due = !state.nudged_missing && has_map_update && calls >= NUDGE_AFTER_CALLS;
+        if !due_by_calls && !due_by_time && !nudge_due {
             return vec![];
         }
 
@@ -770,14 +827,16 @@ impl Reminder for OrientationReminder {
 
         let Some(mission) = mission else {
             // One-time nudge: a session doing real work with no map at all.
-            if state.nudged_missing || seq < NUDGE_AFTER_CALLS {
+            // Only for agents that can actually create one (map_update in
+            // the active toolset — subagents orient, the root maps).
+            if !nudge_due {
                 return vec![];
             }
             let mut res = resources.lock().await;
-            let st = res.get_or_default::<OrientationState>();
-            st.nudged_missing = true;
-            st.last_emit_seq = seq;
-            st.last_emit_unix = now;
+            let st = res.get_or_default::<State<OrientationState>>();
+            st.0.nudged_missing = true;
+            st.0.last_emit_calls = calls;
+            st.0.last_emit_unix = now;
             return vec![
                 "[compass] No mission map exists for this task yet. If this task has more \
                  than a couple of steps, spend one call on map_update: set northStar (the \
@@ -787,11 +846,14 @@ impl Reminder for OrientationReminder {
             ];
         };
 
+        if !due_by_calls && !due_by_time {
+            return vec![];
+        }
         {
             let mut res = resources.lock().await;
-            let st = res.get_or_default::<OrientationState>();
-            st.last_emit_seq = seq;
-            st.last_emit_unix = now;
+            let st = res.get_or_default::<State<OrientationState>>();
+            st.0.last_emit_calls = calls;
+            st.0.last_emit_unix = now;
         }
 
         let done = mission
