@@ -1789,7 +1789,7 @@ impl xai_tool_runtime::Tool for BashTool {
         let tool_call_id = ctx.call_id.clone();
 
         // --- Read resources ---
-        let (backend, session_folder, env, notification_handle, owner_session_id) = {
+        let (backend, session_folder, env, notification_handle, owner_session_id, goal_loop_active) = {
             let res = resources.lock().await;
             (
                 res.require::<Terminal>()?.0.clone(),
@@ -1798,9 +1798,10 @@ impl xai_tool_runtime::Tool for BashTool {
                 res.require::<NotificationHandle>()?.0.clone(),
                 res.get::<crate::types::resources::OwnerSessionId>()
                     .map(|o| o.0.clone()),
+                res.get::<crate::implementations::grok_build::task::types::GoalLoopActive>()
+                    .is_some_and(|g| g.0),
             )
         };
-
         // Per-call streaming sink: when `execute` injected a
         // `PerCallNotificationSink`, fan the session handle out so this call's
         // chunks reach BOTH the session-wide side-channel and the per-call sink.
@@ -1819,6 +1820,13 @@ impl xai_tool_runtime::Tool for BashTool {
 
         let config_timeout = Duration::from_millis(Self::effective_default_timeout_ms(&params));
         let background_enabled = Self::background_enabled(&params);
+        // Goal mode forces auto-backgrounding: a long foreground block is
+        // how agents "wait" by starving the goal loop (the turn never
+        // ends, no event can wake them, sleep-equivalents slip through).
+        // With auto-bg forced, the command keeps running as a background
+        // task, the turn ends promptly, and its completion wakes the
+        // agent — composing with `update_goal(waiting_on: ...)`.
+        let goal_auto_bg = goal_loop_active && background_enabled && !input.is_background;
 
         let config_output_byte_limit = params
             .output_byte_limit
@@ -2050,7 +2058,10 @@ impl xai_tool_runtime::Tool for BashTool {
                 // `auto_background_on_timeout` defaults to `false`;
                 // existing grok_build callers that never opted in are
                 // unaffected.
-                auto_background_on_timeout: Self::auto_background_on_timeout_enabled(&params),
+                // Goal mode ORs in forced auto-bg (budget stays None →
+                // backend default FG budget, env-overridable ~15s).
+                auto_background_on_timeout: Self::auto_background_on_timeout_enabled(&params)
+                    || goal_auto_bg,
                 foreground_block_budget: Self::effective_foreground_block_budget(&params),
                 kind: crate::computer::types::TaskKind::Bash,
                 owner_session_id: owner_session_id.clone(),
@@ -2098,7 +2109,16 @@ impl xai_tool_runtime::Tool for BashTool {
                     .render("${{ tools.by_kind.background_task_action }}")
                     .unwrap_or_else(|_| "get_command_or_subagent_output".to_string());
 
-                let summary = if auto_backgrounded {
+                let summary = if auto_backgrounded && goal_auto_bg {
+                    format!(
+                        "Command \"{}\" blocked the foreground too long for goal mode and was \
+                         automatically moved to background; it is still running and its \
+                         completion will wake you. Do NOT re-run it or poll: if the goal is \
+                         simply waiting on this command (or a timed interval), declare \
+                         update_goal(waiting_on: \"...\", check_in_secs: N) and end your turn.",
+                        input.command,
+                    )
+                } else if auto_backgrounded {
                     format!(
                         "Command \"{}\" exceeded the default timeout and was automatically moved to background. \
                          Process is still running.",
