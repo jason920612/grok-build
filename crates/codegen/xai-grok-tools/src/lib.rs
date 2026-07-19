@@ -21,6 +21,7 @@ pub mod attribution;
 pub mod bridge;
 pub mod computer;
 pub mod gitignore;
+pub mod guardrails;
 pub mod implementations;
 pub mod normalization;
 pub mod notification;

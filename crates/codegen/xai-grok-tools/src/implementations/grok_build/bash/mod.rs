@@ -1826,7 +1826,10 @@ impl xai_tool_runtime::Tool for BashTool {
         // With auto-bg forced, the command keeps running as a background
         // task, the turn ends promptly, and its completion wakes the
         // agent — composing with `update_goal(waiting_on: ...)`.
-        let goal_auto_bg = goal_loop_active && background_enabled && !input.is_background;
+        let goal_auto_bg = crate::guardrails::guardrails().goal_auto_background
+            && goal_loop_active
+            && background_enabled
+            && !input.is_background;
 
         let config_output_byte_limit = params
             .output_byte_limit

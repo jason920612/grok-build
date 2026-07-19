@@ -56,6 +56,48 @@ pub(crate) fn capped_wait_timeout(timeout_ms: Option<u64>) -> Duration {
     base.min(max_wait_block())
 }
 
+/// True when the session's goal loop is currently active (resource maintained
+/// by the shell). Used to tighten blocking-wait caps in goal mode.
+pub(crate) async fn goal_loop_active(resources: &SharedResources) -> bool {
+    resources
+        .lock()
+        .await
+        .get::<crate::implementations::grok_build::task::types::GoalLoopActive>()
+        .is_some_and(|g| g.0)
+}
+
+/// Goal-aware variant of [`capped_wait_timeout`]: while the goal loop is
+/// active (guardrail `goal_block_cap`), a blocking wait clamps to
+/// [`crate::guardrails::GOAL_WAIT_BLOCK_CAP`] so the agent cannot camp the
+/// turn by re-waiting — it should declare `update_goal(waiting_on: ...)` and
+/// let completion wake it. Returns the effective timeout and whether the goal
+/// cap shortened the request.
+pub(crate) fn goal_capped_wait_timeout(
+    timeout_ms: Option<u64>,
+    goal_active: bool,
+) -> (Duration, bool) {
+    let base = capped_wait_timeout(timeout_ms);
+    if goal_active && crate::guardrails::guardrails().goal_block_cap {
+        let cap = crate::guardrails::GOAL_WAIT_BLOCK_CAP;
+        if base > cap {
+            return (cap, true);
+        }
+    }
+    (base, false)
+}
+
+/// Instruction appended to still-pending wait results when the goal-mode cap
+/// truncated the requested wait.
+pub(crate) fn goal_wait_cap_note() -> String {
+    format!(
+        "\n\n[goal mode] This blocking wait was capped at {}s because a goal loop is active. \
+         Do not call this tool again just to keep waiting — record what you're waiting for with \
+         update_goal(waiting_on: ...) and end your turn; task completion will wake you \
+         automatically.",
+        crate::guardrails::GOAL_WAIT_BLOCK_CAP.as_secs()
+    )
+}
+
 pub(crate) fn background_bash_requires_exprs() -> Vec<Expr<ToolRequirement>> {
     use crate::types::tool_metadata::ToolMetadata;
     let grok_build_bash = Expr::Value(ToolRequirement::Tool {
@@ -121,10 +163,13 @@ impl TaskOutputTool {
         }
 
         let waits = xai_tool_types::task_output_waits(timeout_ms);
+        let goal_active = waits && goal_loop_active(&resources).await;
+        let mut goal_capped = false;
         let snapshot = if waits {
             // Cap the blocking wait so a large `timeout_ms` can't wedge the turn;
             // the model is pinged on completion regardless (see `capped_wait_timeout`).
-            let timeout = capped_wait_timeout(timeout_ms);
+            let (timeout, capped) = goal_capped_wait_timeout(timeout_ms, goal_active);
+            goal_capped = capped;
             terminal.wait_for_completion(task_id, Some(timeout)).await
         } else {
             terminal.get_task(task_id).await
@@ -150,11 +195,11 @@ impl TaskOutputTool {
                     )
                 })
                 .unwrap_or(DEFAULT_TOOL_OUTPUT_BYTES);
-            return Ok(TaskOutputOutput::Result(snapshot_to_result(
-                snapshot,
-                &read_file_name,
-                max_output_bytes,
-            )));
+            let mut result = snapshot_to_result(snapshot, &read_file_name, max_output_bytes);
+            if goal_capped && result.status == "running" {
+                result.output.push_str(&goal_wait_cap_note());
+            }
+            return Ok(TaskOutputOutput::Result(result));
         }
 
         let backend = {
@@ -167,7 +212,9 @@ impl TaskOutputTool {
         // Same cap as the bash path: a blocking subagent query can't wedge the
         // turn beyond the wait cap (the parent is pinged when the child finishes).
         let query_timeout_ms = if waits {
-            Some(capped_wait_timeout(timeout_ms).as_millis() as u64)
+            let (timeout, capped) = goal_capped_wait_timeout(timeout_ms, goal_active);
+            goal_capped = capped;
+            Some(timeout.as_millis() as u64)
         } else {
             timeout_ms
         };
@@ -177,7 +224,14 @@ impl TaskOutputTool {
                 .query(task_id, waits, query_timeout_ms)
                 .await
         {
-            return Ok(format_subagent_snapshot(&snapshot));
+            let mut out = format_subagent_snapshot(&snapshot);
+            if goal_capped
+                && let TaskOutputOutput::Result(r) = &mut out
+                && (r.status == "running" || r.status == "initializing")
+            {
+                r.output.push_str(&goal_wait_cap_note());
+            }
+            return Ok(out);
         }
 
         // Neither found
@@ -209,7 +263,8 @@ impl TaskOutputTool {
         tool_name_for_truncation: &str,
     ) -> Result<TaskOutputOutput, xai_tool_runtime::ToolError> {
         let waits = xai_tool_types::task_output_waits(timeout_ms);
-        let timeout = capped_wait_timeout(timeout_ms);
+        let goal_active = waits && goal_loop_active(&resources).await;
+        let (timeout, goal_capped) = goal_capped_wait_timeout(timeout_ms, goal_active);
 
         let (terminal, backend, read_file_name, max_output_bytes) = {
             let res = resources.lock().await;
@@ -269,7 +324,10 @@ impl TaskOutputTool {
             .count();
         let total = results.len();
         let mode_str = if waits { "wait_all" } else { "poll" };
-        let summary = format!("{completed_count}/{total} tasks completed ({mode_str})");
+        let mut summary = format!("{completed_count}/{total} tasks completed ({mode_str})");
+        if goal_capped && completed_count < total {
+            summary.push_str(&goal_wait_cap_note());
+        }
 
         Ok(TaskOutputOutput::MultiResult(MultiTaskOutputResult {
             mode: mode_str.to_string(),
@@ -950,6 +1008,42 @@ mod tests {
         assert_eq!(capped_wait_timeout(Some(36_000_000)), MAX_WAIT_BLOCK);
         // Exactly at the cap (10m) -> unchanged.
         assert_eq!(capped_wait_timeout(Some(600_000)), MAX_WAIT_BLOCK);
+    }
+
+    // While the goal loop is active the block cap tightens to
+    // GOAL_WAIT_BLOCK_CAP so the agent declares waiting_on instead of
+    // camping the turn on repeated waits (guardrail `goal_block_cap`).
+    #[test]
+    fn goal_cap_clamps_only_in_goal_mode() {
+        use crate::guardrails::{GOAL_WAIT_BLOCK_CAP, Guardrails, set_guardrails_for_test};
+
+        let _g = set_guardrails_for_test(Guardrails::default());
+        // Outside goal mode: only the normal 10m cap applies.
+        assert_eq!(
+            goal_capped_wait_timeout(Some(600_000), false),
+            (MAX_WAIT_BLOCK, false)
+        );
+        // In goal mode: clamped to the goal cap and flagged.
+        assert_eq!(
+            goal_capped_wait_timeout(Some(600_000), true),
+            (GOAL_WAIT_BLOCK_CAP, true)
+        );
+        // Short waits pass through untouched even in goal mode.
+        assert_eq!(
+            goal_capped_wait_timeout(Some(5_000), true),
+            (Duration::from_millis(5_000), false)
+        );
+        drop(_g);
+
+        // Guardrail off: goal mode no longer tightens the cap.
+        let _g = set_guardrails_for_test(Guardrails {
+            goal_block_cap: false,
+            ..Guardrails::default()
+        });
+        assert_eq!(
+            goal_capped_wait_timeout(Some(600_000), true),
+            (MAX_WAIT_BLOCK, false)
+        );
     }
 
     #[test]

@@ -1529,6 +1529,7 @@ impl FinalizedToolset {
                 None => return Ok(()),
             }
         };
+        let rails = crate::guardrails::guardrails();
         // Fresh-evidence timeline: record edit/execute ordering on every
         // call, and refuse a goal-completion claim whose latest edit has
         // no later verification run. Independent of the blackboard.
@@ -1542,7 +1543,8 @@ impl FinalizedToolset {
             if kind == crate::types::tool::ToolKind::Execute {
                 tl.last_execute = tl.seq;
             }
-            if kind == crate::types::tool::ToolKind::GoalUpdate
+            if rails.fresh_evidence
+                && kind == crate::types::tool::ToolKind::GoalUpdate
                 && tool_args.get("completed").and_then(|v| v.as_bool()) == Some(true)
                 && tl.last_edit > 0
                 && tl.last_edit > tl.last_execute
@@ -1557,7 +1559,7 @@ impl FinalizedToolset {
         if !verifies && !gated {
             return Ok(());
         }
-        if std::env::var("GROK_VERIFY_FIRST").is_ok_and(|v| v == "0" || v.eq_ignore_ascii_case("off")) {
+        if !rails.verify_first {
             return Ok(());
         }
         let mut res = self.resources.lock().await;

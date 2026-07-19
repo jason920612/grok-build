@@ -474,7 +474,7 @@ impl xai_tool_runtime::Tool for BoardPostTool {
             )
         };
 
-        if input.kind.requires_evidence() {
+        if input.kind.requires_evidence() && crate::guardrails::guardrails().evidence_spot_check {
             let evidence = input.evidence.clone();
             let check = tokio::task::spawn_blocking(move || {
                 spot_check_evidence(&evidence, cwd.as_deref())

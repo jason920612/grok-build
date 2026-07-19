@@ -169,8 +169,13 @@ impl xai_tool_runtime::Tool for WaitTasksTool {
         }
 
         // wait_any: keep legacy event-driven path (not exposed on get_task_output).
-        let timeout =
-            crate::implementations::grok_build::task_output::capped_wait_timeout(input.timeout_ms);
+        let goal_active =
+            crate::implementations::grok_build::task_output::goal_loop_active(&resources).await;
+        let (timeout, goal_capped) =
+            crate::implementations::grok_build::task_output::goal_capped_wait_timeout(
+                input.timeout_ms,
+                goal_active,
+            );
 
         let (terminal, backend, read_file_name, max_output_bytes) = {
             let res = resources.lock().await;
@@ -232,7 +237,11 @@ impl xai_tool_runtime::Tool for WaitTasksTool {
             .filter(|r| r.status == "completed" || r.status == "failed" || r.status == "cancelled")
             .count();
         let total = results.len();
-        let summary = format!("{completed_count}/{total} tasks completed (wait_any)");
+        let mut summary = format!("{completed_count}/{total} tasks completed (wait_any)");
+        if goal_capped && completed_count == 0 {
+            summary
+                .push_str(&crate::implementations::grok_build::task_output::goal_wait_cap_note());
+        }
 
         Ok(TaskOutputOutput::MultiResult(MultiTaskOutputResult {
             mode: "wait_any".to_string(),
