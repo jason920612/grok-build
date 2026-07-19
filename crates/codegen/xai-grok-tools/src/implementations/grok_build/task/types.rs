@@ -227,6 +227,9 @@ impl SubagentCapabilityModeExt for SubagentCapabilityMode {
                 ToolKind::BoardPost,
                 ToolKind::RosterList,
                 ToolKind::RosterAction,
+                // Mission-map read access: subagents orient on the shared
+                // map; only the root session restructures it (no MapUpdate).
+                ToolKind::MapRead,
             ],
             Self::ReadWrite => &[
                 ToolKind::Read,
@@ -260,6 +263,9 @@ impl SubagentCapabilityModeExt for SubagentCapabilityMode {
                 ToolKind::BoardPost,
                 ToolKind::RosterList,
                 ToolKind::RosterAction,
+                // Mission-map read access: subagents orient on the shared
+                // map; only the root session restructures it (no MapUpdate).
+                ToolKind::MapRead,
             ],
             Self::Execute => &[
                 ToolKind::Read,
@@ -286,6 +292,9 @@ impl SubagentCapabilityModeExt for SubagentCapabilityMode {
                 ToolKind::BoardPost,
                 ToolKind::RosterList,
                 ToolKind::RosterAction,
+                // Mission-map read access: subagents orient on the shared
+                // map; only the root session restructures it (no MapUpdate).
+                ToolKind::MapRead,
             ],
             Self::All => &[
                 ToolKind::Read,
@@ -320,6 +329,9 @@ impl SubagentCapabilityModeExt for SubagentCapabilityMode {
                 ToolKind::BoardPost,
                 ToolKind::RosterList,
                 ToolKind::RosterAction,
+                // Mission-map read access: subagents orient on the shared
+                // map; only the root session restructures it (no MapUpdate).
+                ToolKind::MapRead,
             ],
         }
     }

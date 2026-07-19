@@ -132,6 +132,8 @@ pub fn canonical_input(input: &ToolInput) -> Option<serde_json::Value> {
         | ToolInput::BoardRead(_)
         | ToolInput::RosterList(_)
         | ToolInput::RosterAdd(_)
+        | ToolInput::MapUpdate(_)
+        | ToolInput::MapRead(_)
         | ToolInput::Dynamic(_) => return None,
     })
 }

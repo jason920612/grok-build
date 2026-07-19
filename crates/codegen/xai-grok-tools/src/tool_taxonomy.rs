@@ -72,6 +72,8 @@ impl ToolKind {
             ToolKind::BoardPost => "Post to Blackboard",
             ToolKind::RosterList => "View Roster",
             ToolKind::RosterAction => "Update Roster",
+            ToolKind::MapRead => "Read Mission Map",
+            ToolKind::MapUpdate => "Update Mission Map",
             ToolKind::Other => "Tool",
         }
     }
@@ -94,6 +96,7 @@ impl ToolKind {
             | ToolKind::ExitPlan
             | ToolKind::BoardRead
             | ToolKind::RosterList
+            | ToolKind::MapRead
             | ToolKind::AskUser => true,
             ToolKind::Edit
             | ToolKind::Delete
@@ -117,6 +120,7 @@ impl ToolKind {
             | ToolKind::GoalUpdate
             | ToolKind::BoardPost
             | ToolKind::RosterAction
+            | ToolKind::MapUpdate
             | ToolKind::Other => false,
         }
     }

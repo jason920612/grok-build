@@ -2180,6 +2180,9 @@ impl SessionActor {
             .goal_loop_active_gate
             .store(false, std::sync::atomic::Ordering::Relaxed);
         tracing::info!(waiting_on = %waiting_on, secs, "goal wait window opened");
+        // A long declared wait is thinking time: kick off the incubation
+        // agent (read-only, silent output) to fill it with divergent ideas.
+        self.maybe_spawn_incubation(&waiting_on, secs);
         format!(
             "Waiting acknowledged: \"{waiting_on}\" ({secs}s window). Goal nudges are paused; \
              background-task, monitor and scheduler events will wake you. If nothing can wake \
@@ -2188,6 +2191,38 @@ impl SessionActor {
              prompt: \"Goal check-in: verify whether '{waiting_on}' has finished; if still \
              pending, declare waiting again via update_goal\"). Then end your turn — do not poll."
         )
+    }
+
+    /// Spawn the incubation subagent for a long-enough goal wait, rate
+    /// limited per session (see [`crate::session::incubation`]). Sync and
+    /// fire-and-forget: only a channel send plus a detached result reader.
+    fn maybe_spawn_incubation(&self, waiting_on: &str, secs: u64) {
+        let Some(event_tx) = self.tool_context.subagent_event_tx.clone() else {
+            return;
+        };
+        if !crate::session::incubation::should_incubate(&self.session_id_string(), secs) {
+            return;
+        }
+        let mission_path = self
+            .tool_context
+            .blackboard_path
+            .as_ref()
+            .and_then(|p| p.parent())
+            .map(|d| d.join("mission.json").display().to_string());
+        let parent_prompt_id = self
+            .current_prompt_id
+            .lock()
+            .expect("current_prompt_id mutex poisoned")
+            .clone();
+        crate::session::incubation::spawn_incubation(
+            event_tx,
+            self.session_id_string(),
+            parent_prompt_id,
+            Some(self.tool_context.cwd.as_str().to_owned()),
+            waiting_on.to_string(),
+            secs,
+            mission_path,
+        );
     }
 
     /// Close the wait window (any turn starting means the agent is active

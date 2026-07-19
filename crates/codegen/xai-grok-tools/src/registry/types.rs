@@ -673,6 +673,8 @@ impl ToolRegistryBuilder {
         b.register::<grok_build::TodoWriteTool>();
         b.register::<grok_build::BoardPostTool>();
         b.register::<grok_build::BoardReadTool>();
+        b.register::<grok_build::MapUpdateTool>();
+        b.register::<grok_build::MapReadTool>();
         b.register::<grok_build::RosterListTool>();
         b.register::<grok_build::RosterAddTool>();
         b.register::<grok_build::UpdateGoalTool>();
@@ -744,6 +746,7 @@ impl ToolRegistryBuilder {
         b.register_reminder(crate::reminders::TaskCompletionReminder);
         b.register_reminder(SkillDiscoveryReminder);
         b.register_reminder(grok_build::BlackboardDigestReminder);
+        b.register_reminder(grok_build::OrientationReminder);
         for pack in tool_packs().lock().iter() {
             pack(&mut b);
         }
@@ -1496,9 +1499,13 @@ impl FinalizedToolset {
             canonical_params). await; while let Some(item) = inner.next(). await {
             match item { xai_tool_runtime::ToolStreamItem::Progress(p) => { yield
             xai_tool_runtime::ToolStreamItem::Progress(p); }
-            xai_tool_runtime::ToolStreamItem::Terminal(Err(e)) => { yield
+            xai_tool_runtime::ToolStreamItem::Terminal(Err(e)) => {
+            // Stuck detection: count the failure and append divergence
+            // guidance when this failure crosses the stuck threshold.
+            let e = this.note_tool_failure(&tool_name, e). await; yield
             xai_tool_runtime::ToolStreamItem::Terminal(Err(e)); return; }
-            xai_tool_runtime::ToolStreamItem::Terminal(Ok(typed)) => { let run_result
+            xai_tool_runtime::ToolStreamItem::Terminal(Ok(typed)) => {
+            this.note_tool_success(&tool_name). await; let run_result
             = this.finalize_output(typed.value, & output_converter,
             effective_tool_name). await; yield
             xai_tool_runtime::ToolStreamItem::Terminal(run_result); return; } } }
@@ -1554,6 +1561,33 @@ impl FinalizedToolset {
                 ));
             }
         }
+        // Stuck hard gate (guardrail `stuck_gate`): after a REPEAT stuck
+        // episode, mutation/execution/delegation is refused until the agent
+        // posts a reflective board entry. Observation and board/map tools
+        // stay open — reflection is the way out, and a reflective post
+        // disarms the gate right here (pre-dispatch, so the post itself
+        // always goes through).
+        {
+            use crate::implementations::grok_build::compass;
+            let mut res = self.resources.lock().await;
+            let tracker = res.get_or_default::<compass::StuckTracker>();
+            if tracker.gate_armed {
+                if kind == crate::types::tool::ToolKind::BoardPost
+                    && tool_args
+                        .get("kind")
+                        .and_then(|v| v.as_str())
+                        .is_some_and(compass::board_kind_disarms_stuck)
+                {
+                    tracker.gate_armed = false;
+                    tracker.gate_reason.clear();
+                } else if rails.stuck_gate && compass::kind_blocked_by_stuck_gate(kind) {
+                    let reason = tracker.gate_reason.clone();
+                    return Err(xai_tool_runtime::ToolError::invalid_arguments(
+                        compass::stuck_gate_rejection(tool_name, &reason),
+                    ));
+                }
+            }
+        }
         let verifies = blackboard::kind_verifies(kind);
         let gated = blackboard::kind_requires_verification(kind);
         if !verifies && !gated {
@@ -1580,6 +1614,62 @@ impl FinalizedToolset {
             ));
         }
         Ok(())
+    }
+    /// Record a failed tool call in the stuck tracker (mechanical impasse
+    /// detection — see `compass::StuckTracker`). Returns the error unchanged
+    /// unless this failure crosses the stuck threshold, in which case
+    /// divergence guidance is appended (and a repeat episode arms the hard
+    /// gate under guardrail `stuck_gate`). Wait/poll/board/map kinds are
+    /// exempt: polling during a legitimate wait is not a loop.
+    async fn note_tool_failure(
+        &self,
+        tool_name: &str,
+        error: xai_tool_runtime::ToolError,
+    ) -> xai_tool_runtime::ToolError {
+        use crate::implementations::grok_build::compass;
+        let kind = {
+            let tools = self.tools.read();
+            match tools.iter().find(|t| t.client_name == tool_name) {
+                Some(t) => t.metadata.kind(),
+                None => return error,
+            }
+        };
+        if compass::kind_exempt_from_stuck(kind) {
+            return error;
+        }
+        let message = error.to_string();
+        let fp = (tool_name.to_string(), compass::error_class(&message));
+        let (episode, armed) = {
+            let mut res = self.resources.lock().await;
+            let tracker = res.get_or_default::<compass::StuckTracker>();
+            let count = tracker.counts.entry(fp.clone()).or_insert(0);
+            *count += 1;
+            if *count < compass::STUCK_THRESHOLD {
+                return error;
+            }
+            *count = 0;
+            let episode = tracker.episodes.entry(fp).or_insert(0);
+            *episode += 1;
+            let episode = *episode;
+            let armed = episode >= 2 && crate::guardrails::guardrails().stuck_gate;
+            if armed {
+                tracker.gate_armed = true;
+                tracker.gate_reason = format!(
+                    "'{tool_name}': {}",
+                    message.lines().next().unwrap_or("").chars().take(80).collect::<String>()
+                );
+            }
+            (episode, armed)
+        };
+        let guidance = compass::stuck_guidance(tool_name, episode, armed);
+        xai_tool_runtime::ToolError::custom(tool_name, format!("{message}{guidance}"))
+    }
+    /// A success of a tool clears its stuck fingerprints — the wall broke.
+    async fn note_tool_success(&self, tool_name: &str) {
+        use crate::implementations::grok_build::compass;
+        let mut res = self.resources.lock().await;
+        let tracker = res.get_or_default::<compass::StuckTracker>();
+        tracker.counts.retain(|(name, _), _| name != tool_name);
     }
     /// Pre-dispatch setup shared by [`call`] / [`call_streaming`].
     ///

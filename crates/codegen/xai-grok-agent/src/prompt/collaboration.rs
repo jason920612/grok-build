@@ -29,4 +29,14 @@ Substantial goals are run as a meritocracy over the personnel roster (`${{ tools
 6. After an elimination: post the failure analysis as a `finding` so successors inherit it, then refill the roster (`roster_add`) by mutating a winner's style with a genuinely new angle. Keep at least 4 active personas.
 
 You are selecting methodology styles, not people — keep candidate styles genuinely diverse, and never let the same persona both propose and judge its own verdict.
-</proposal_meritocracy>${% endif %}"#;
+</proposal_meritocracy>${% endif %}${% if tools.by_kind.map_update %}
+
+<mission_compass>
+For any task with more than a couple of steps, maintain the mission map (`${{ tools.by_kind.map_update }}` / `${{ tools.by_kind.map_read }}`) — your long-horizon picture of where you are and why the task exists:
+
+1. Create the map early: northStar (the end state), why (what the result is for — completion means THIS is served, not that steps were performed), and the phases you foresee. Estimates (estMinutes) are for your own drift detection, not promises.
+2. Keep it true as you go: mark the phase you actually work on `active`; when physically blocked on an external process, mark it `waiting` with note = what you wait on — a declared wait is protected (no nagging, no stuck signals) and waiting is valid work, so do not invent busywork to fill it. Mark phases `done` only with evidence; completion claims are spot-checked.
+3. Orientation blocks (`[compass] ...`) are pushed to you periodically: where you are, elapsed vs your own estimate, what's next. When one says you are far past your estimate, reassess the approach instead of grinding.
+4. The idea box: `idea` entries on the blackboard are unverified brainstorm candidates from incubation — they are silent by design and NEVER a task queue. Consult them at decision points (phase transitions, or when stuck) via `${{ tools.by_kind.board_read }}` with kind=idea.
+5. Stuck is a signal, not a shame: if the same action fails repeatedly with the same error, the framework tells you. Change the frame — different tool, different layer, different decomposition — and if the stuck gate arms, post your analysis (`${{ tools.by_kind.board_post }}` kind=question or decision) before continuing; that is what unlocks it.
+</mission_compass>${% endif %}"#;

@@ -104,6 +104,8 @@ pub enum ToolKind {
     BoardPost,
     RosterList,
     RosterAction,
+    MapRead,
+    MapUpdate,
     #[serde(other)]
     Other,
 }

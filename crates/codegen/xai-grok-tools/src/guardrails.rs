@@ -37,6 +37,11 @@ pub struct Guardrails {
     /// `board_post` spot-checks `file:line` evidence citations against
     /// the real filesystem.
     pub evidence_spot_check: bool,
+    /// A repeat stuck episode (same tool failing with the same error class,
+    /// twice over the threshold) hard-blocks mutation/execution until the
+    /// agent posts a reflective board entry. Soft stuck guidance (appended
+    /// to the triggering error) is permanent capability and not gated here.
+    pub stuck_gate: bool,
 }
 
 impl Default for Guardrails {
@@ -47,6 +52,7 @@ impl Default for Guardrails {
             goal_auto_background: true,
             goal_block_cap: true,
             evidence_spot_check: true,
+            stuck_gate: true,
         }
     }
 }
@@ -68,6 +74,7 @@ fn resolve_from_env() -> Guardrails {
             goal_auto_background: false,
             goal_block_cap: false,
             evidence_spot_check: false,
+            stuck_gate: false,
         },
         _ => Guardrails::default(),
     };
@@ -90,6 +97,9 @@ fn resolve_from_env() -> Guardrails {
     }
     if let Some(v) = env_flag("GROK_GUARDRAIL_EVIDENCE_SPOT_CHECK") {
         g.evidence_spot_check = v;
+    }
+    if let Some(v) = env_flag("GROK_GUARDRAIL_STUCK_GATE") {
+        g.stuck_gate = v;
     }
     g
 }

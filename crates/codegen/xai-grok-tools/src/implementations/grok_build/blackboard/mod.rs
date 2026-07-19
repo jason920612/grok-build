@@ -80,6 +80,13 @@ pub enum EntryKind {
     /// proposal, and an explicit `outcome` — which mechanically drives
     /// roster personnel actions (promotion / elimination).
     Verdict,
+    /// A divergent-thinking candidate (incubation output): an alternative
+    /// approach, analogy, or hypothesis. Explicitly UNVERIFIED — no evidence
+    /// required. Ideas go to the idea box: they are excluded from digests and
+    /// default `board_read` so they never pressure an agent into action;
+    /// they surface at decision points (phase transitions, stuck episodes)
+    /// or on demand via `board_read` with `kind=idea`.
+    Idea,
 }
 
 impl EntryKind {
@@ -94,6 +101,7 @@ impl EntryKind {
             Self::Direction => "direction",
             Self::Proposal => "proposal",
             Self::Verdict => "verdict",
+            Self::Idea => "idea",
         }
     }
 
@@ -217,6 +225,11 @@ async fn read_entries(path: PathBuf) -> std::io::Result<Vec<BoardEntry>> {
         .map_err(|e| std::io::Error::other(format!("blackboard read task panicked: {e}")))?
 }
 
+/// Shared board read access for the compass module (idea-box counts).
+pub(crate) async fn read_entries_for_compass(path: PathBuf) -> std::io::Result<Vec<BoardEntry>> {
+    read_entries(path).await
+}
+
 fn now_rfc3339() -> String {
     chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
 }
@@ -276,7 +289,8 @@ fn parse_evidence_ref(evidence: &str) -> Option<EvidenceRef> {
 /// filesystem: the file must exist and contain the cited line. This catches
 /// fabricated citations, not wrong conclusions — an agent can still cite a
 /// real line and misread it, but it cannot invent locations.
-fn spot_check_evidence(
+/// Shared with the compass module's phase-completion validation.
+pub(crate) fn spot_check_evidence(
     evidence: &[String],
     cwd: Option<&Path>,
 ) -> Result<(), String> {
@@ -334,7 +348,7 @@ fn spot_check_evidence(
 #[serde(rename_all = "camelCase")]
 pub struct BoardPostInput {
     #[schemars(
-        description = "Entry kind: finding | test_result | claim | question | decision | correction. finding/test_result/claim/correction REQUIRE evidence."
+        description = "Entry kind: finding | test_result | claim | question | decision | correction | idea. finding/test_result/claim/correction REQUIRE evidence. idea = an unverified divergent-thinking candidate; it goes to the silent idea box (never pushed to teammates)."
     )]
     pub kind: EntryKind,
 
@@ -606,6 +620,12 @@ pub struct BoardReadInput {
     )]
     #[serde(default)]
     pub include_superseded: bool,
+
+    #[schemars(
+        description = "Also show idea-box entries (kind=idea), hidden by default. Ideas are unverified brainstorm candidates — consult them at decision points, not as a task queue."
+    )]
+    #[serde(default)]
+    pub include_ideas: bool,
 }
 
 /// Read the shared blackboard (optionally filtered).
@@ -696,11 +716,22 @@ impl xai_tool_runtime::Tool for BoardReadTool {
             .filter(|e| superseded.contains(e.id.as_str()))
             .count();
 
+        // Ideas live in the silent idea box: hidden unless asked for
+        // (explicitly or by filtering on kind=idea) so they inform decisions
+        // without ever reading as a task queue.
+        let show_ideas = input.include_ideas || input.kind == Some(EntryKind::Idea);
+        let hidden_ideas = if show_ideas {
+            0
+        } else {
+            entries.iter().filter(|e| e.kind == EntryKind::Idea).count()
+        };
+
         let limit = input.limit.unwrap_or(50).max(1);
         let matching: Vec<String> = entries
             .iter()
             .enumerate()
             .filter(|(_, e)| input.include_superseded || !superseded.contains(e.id.as_str()))
+            .filter(|(_, e)| show_ideas || e.kind != EntryKind::Idea)
             .filter(|(_, e)| {
                 input
                     .topic
@@ -739,6 +770,11 @@ impl xai_tool_runtime::Tool for BoardReadTool {
             if !input.include_superseded && hidden_superseded > 0 {
                 header.push_str(&format!(
                     ", {hidden_superseded} superseded hidden — includeSuperseded to view"
+                ));
+            }
+            if hidden_ideas > 0 {
+                header.push_str(&format!(
+                    ", {hidden_ideas} ideas in the idea box — includeIdeas to view"
                 ));
             }
             format!("{header}:\n{listed}")
@@ -799,6 +835,10 @@ impl Reminder for BlackboardDigestReminder {
             .enumerate()
             .skip(seen as usize)
             .filter(|(_, e)| e.author != cfg.author)
+            // Ideas never push: the idea box is silent by design so incubation
+            // output cannot pressure a working (or legitimately waiting) agent
+            // into busywork. Ideas surface at decision points instead.
+            .filter(|(_, e)| e.kind != EntryKind::Idea)
             .collect();
 
         let has_correction = fresh
@@ -1012,6 +1052,7 @@ mod tests {
                 author: None,
                 limit: None,
                 include_superseded: false,
+                include_ideas: false,
             },
         )
         .await
@@ -1084,6 +1125,7 @@ mod tests {
                 author: None,
                 limit: None,
                 include_superseded: false,
+                include_ideas: false,
             },
         )
         .await
@@ -1274,6 +1316,7 @@ mod tests {
             author: None,
             limit: None,
             include_superseded: include,
+            include_ideas: false,
         };
         let out = xai_tool_runtime::Tool::run(&BoardReadTool, test_ctx(shared.clone()), read(false))
             .await
