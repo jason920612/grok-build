@@ -106,6 +106,7 @@ pub enum ToolKind {
     RosterAction,
     MapRead,
     MapUpdate,
+    Workflow,
     #[serde(other)]
     Other,
 }

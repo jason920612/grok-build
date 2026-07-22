@@ -147,7 +147,10 @@ pub fn spawn_incubation(
         // Harness-internal: the waiting model must never be woken or
         // notified by incubation — its ideas wait silently in the idea box.
         surface_completion: false,
+        await_to_completion: false,
         fork_context: false,
+        owner: crate::implementations::grok_build::task::types::SubagentOwner::Task,
+        cancel_token: tokio_util::sync::CancellationToken::new(),
         result_tx,
     };
     if event_tx

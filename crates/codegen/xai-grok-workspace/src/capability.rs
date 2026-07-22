@@ -109,6 +109,7 @@ pub(crate) const ALL_TOOL_KINDS: &[ToolKind] = &[
     ToolKind::RosterAction,
     ToolKind::MapRead,
     ToolKind::MapUpdate,
+    ToolKind::Workflow,
     ToolKind::Other,
 ];
 
@@ -158,8 +159,7 @@ pub(crate) fn kind_allowed(mode: CapabilityMode, kind: ToolKind) -> bool {
         // Bash / shell.
         Execute => matches!(mode, M::Execute),
 
-        // Process control (background tasks, monitors).
-        BackgroundTaskAction | WaitTasksAction | KillTaskAction | Task | Monitor => {
+        BackgroundTaskAction | WaitTasksAction | KillTaskAction | Task | Monitor | Workflow => {
             matches!(mode, M::Execute)
         }
 
