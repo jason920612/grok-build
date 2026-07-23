@@ -860,6 +860,14 @@ impl Reminder for BlackboardDigestReminder {
             return vec![];
         }
 
+        // Foreign entries are teammate-authored content — a compromised or
+        // adversarial subagent could embed forged harness markers in a body
+        // (a correction that fakes a system-reminder / gate reset carries
+        // extra weight because it already resets the real gate). Neutralize
+        // any forged markers before this content rides the trusted digest
+        // channel into the model's context.
+        let clean = |line: String| crate::antiinjection::sanitize_untrusted(&line).0;
+
         // Corrections always shown in full; the rest budgeted, newest last.
         let (corrections, others): (Vec<_>, Vec<_>) = fresh
             .iter()
@@ -867,13 +875,13 @@ impl Reminder for BlackboardDigestReminder {
         let overflow = others.len().saturating_sub(DIGEST_MAX_ENTRIES);
         let mut lines: Vec<String> = corrections
             .iter()
-            .map(|(i, e)| format!("!! {}", e.render(*i as u64 + 1)))
+            .map(|(i, e)| clean(format!("!! {}", e.render(*i as u64 + 1))))
             .collect();
         lines.extend(
             others
                 .iter()
                 .skip(overflow)
-                .map(|(i, e)| e.render(*i as u64 + 1)),
+                .map(|(i, e)| clean(e.render(*i as u64 + 1))),
         );
 
         let mut msg = format!(

@@ -48,6 +48,12 @@ pub struct Guardrails {
     /// is to do everything solo — the model stays the commander (execute,
     /// adapt, or decline); pure advisory text, no gate.
     pub adjutant: bool,
+    /// Structural prompt-injection defense on the tool-return path:
+    /// neutralize forged harness markers in all tool output, and fence
+    /// external-source payloads (web/read) with an unforgeable provenance
+    /// delimiter + data anchor. Counters the model's own trust in tool
+    /// returns being turned against it.
+    pub antiinjection: bool,
 }
 
 impl Default for Guardrails {
@@ -60,6 +66,7 @@ impl Default for Guardrails {
             evidence_spot_check: true,
             stuck_gate: true,
             adjutant: true,
+            antiinjection: true,
         }
     }
 }
@@ -83,6 +90,7 @@ fn resolve_from_env() -> Guardrails {
             evidence_spot_check: false,
             stuck_gate: false,
             adjutant: false,
+            antiinjection: false,
         },
         _ => Guardrails::default(),
     };
@@ -111,6 +119,9 @@ fn resolve_from_env() -> Guardrails {
     }
     if let Some(v) = env_flag("GROK_GUARDRAIL_ADJUTANT") {
         g.adjutant = v;
+    }
+    if let Some(v) = env_flag("GROK_GUARDRAIL_ANTIINJECTION") {
+        g.antiinjection = v;
     }
     g
 }

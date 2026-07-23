@@ -16,6 +16,7 @@ pub use util::mcp_truncate::{
     mcp_max_output_bytes, mcp_max_output_bytes_from_env, set_mcp_max_output_bytes,
 };
 
+pub mod antiinjection;
 pub mod attribution;
 
 pub mod bridge;

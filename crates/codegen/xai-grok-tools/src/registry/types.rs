@@ -1536,7 +1536,7 @@ impl FinalizedToolset {
                     xai_tool_runtime::ToolStreamItem::Terminal(Ok(typed)) => {
                         this.note_tool_success(&tool_name).await;
                         let run_result = this
-                            .finalize_output(typed.value, &output_converter, effective_tool_name)
+                            .finalize_output(typed.value, &output_converter, effective_tool_name, &tool_name)
                             .await;
                         yield xai_tool_runtime::ToolStreamItem::Terminal(run_result);
                         return;
@@ -1794,6 +1794,7 @@ impl FinalizedToolset {
         value: serde_json::Value,
         output_converter: &OutputConverter,
         effective_tool_name: Option<String>,
+        tool_name: &str,
     ) -> Result<ToolRunResult, xai_tool_runtime::ToolError> {
         let output = (output_converter)(value)
             .map_err(|e| xai_tool_runtime::ToolError::custom("output_decoding", e.to_string()))?;
@@ -1818,7 +1819,27 @@ impl FinalizedToolset {
         } else {
             Vec::new()
         };
-        let prompt_text = output.to_prompt_format();
+        // Anti-injection runs on the tool's OWN payload before harness
+        // reminders are appended: sanitize forged trusted-markers and fence
+        // external-source content. Reminders are harness-authored and keep
+        // their real (trusted) tags — so a forged tag in the payload is
+        // neutralized while the genuine reminder channel is untouched.
+        let prompt_text = {
+            let raw = output.to_prompt_format();
+            // Resolve the effective tool kind (through use_tool indirection).
+            let effective = effective_tool_name.as_deref().unwrap_or(tool_name);
+            let kind = {
+                let tools = self.tools.read();
+                tools
+                    .iter()
+                    .find(|t| t.client_name == effective)
+                    .map(|t| t.metadata.kind())
+            };
+            match kind {
+                Some(k) => crate::antiinjection::defend_output(raw, k, effective).0,
+                None => raw,
+            }
+        };
         let prompt_text = crate::reminders::format_with_reminders(
             prompt_text,
             reminders,
