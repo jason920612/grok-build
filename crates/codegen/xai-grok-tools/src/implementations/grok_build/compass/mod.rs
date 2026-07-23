@@ -279,6 +279,18 @@ pub async fn declared_waiting(resources: &crate::types::resources::SharedResourc
 /// Phases estimated shorter than this don't get a scout draft.
 const ADJUTANT_MIN_EST_MINUTES: u64 = 5;
 
+/// How a scout draft is framed — which felt-benefit it can honestly claim.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DraftFraming {
+    /// The just-activated phase's own reconnaissance is missing.
+    InPlace,
+    /// Reconnaissance ahead of the advance: the next pending phase.
+    Lookahead,
+    /// Lookahead offered at a wait declaration — the zero-opportunity-cost
+    /// slot (the model just declared it has nothing to do).
+    WaitSlot,
+}
+
 /// Which phases already received a scout draft (registered + persisted so
 /// harness rebuilds don't re-draft). One draft per phase, ever: the
 /// commander saw the offer once; repeating it would be nagging.
@@ -348,22 +360,33 @@ async fn board_covers(
 /// the scout carries an explicit no-speculation clause (nothing
 /// observable yet ⇒ post nothing); the board's evidence spot-check
 /// rejects uncited findings mechanically.
-fn adjutant_draft(task_tool: &str, title: &str, lookahead: bool) -> String {
+fn adjutant_draft(task_tool: &str, title: &str, framing: DraftFraming) -> String {
     let topic = topic_slug(title);
-    let (situation, benefit) = if lookahead {
-        (
+    let (situation, benefit) = match framing {
+        // The wait slot is the zero-opportunity-cost moment: the model just
+        // declared it has nothing to do, so solo-preference has no pull.
+        // Say that out loud — this is the only benefit the model can FEEL
+        // at signing time.
+        DraftFraming::WaitSlot => (
+            format!(
+                "You are about to wait, and the NEXT phase '{title}' has no verified \
+                 reconnaissance on the board yet"
+            ),
+            "during your wait — it costs you nothing (you are waiting anyway), and its \
+             findings will already be on the board when you wake",
+        ),
+        DraftFraming::Lookahead => (
             format!(
                 "The NEXT phase '{title}' has no verified reconnaissance on the board yet"
             ),
             "and its findings will already be waiting on the board when you get there",
-        )
-    } else {
-        (
+        ),
+        DraftFraming::InPlace => (
             format!(
                 "Phase '{title}' is now active with no verified findings on the board"
             ),
             "while you keep working — findings reach you via digest",
-        )
+        ),
     };
     format!(
         "\n\n[compass adjutant] {situation}. A scout order is drafted and ready to sign:\n\
@@ -767,21 +790,29 @@ impl xai_tool_runtime::Tool for MapUpdateTool {
         // (AdjutantLedger) and at most one per call.
         let mut adjutant_note = None;
         if phase_transition.is_some() && crate::guardrails::guardrails().adjutant {
-            let mut candidates: Vec<(String, Option<u64>, bool)> = Vec::new();
+            let mut candidates: Vec<(String, Option<u64>, DraftFraming)> = Vec::new();
             if let Some((title, PhaseStatus::Active)) = &phase_transition {
                 let est = mission
                     .phases
                     .iter()
                     .find(|p| p.title == *title)
                     .and_then(|p| p.est_minutes);
-                candidates.push((title.clone(), est, false));
+                candidates.push((title.clone(), est, DraftFraming::InPlace));
             }
+            // A wait declaration is the zero-opportunity-cost slot for
+            // delegation — frame the lookahead accordingly.
+            let lookahead_framing = if matches!(phase_transition, Some((_, PhaseStatus::Waiting)))
+            {
+                DraftFraming::WaitSlot
+            } else {
+                DraftFraming::Lookahead
+            };
             if let Some(next) = mission
                 .phases
                 .iter()
                 .find(|p| p.status == PhaseStatus::Pending)
             {
-                candidates.push((next.title.clone(), next.est_minutes, true));
+                candidates.push((next.title.clone(), next.est_minutes, lookahead_framing));
             }
 
             let task_tool = {
@@ -790,7 +821,7 @@ impl xai_tool_runtime::Tool for MapUpdateTool {
                     .and_then(|r| r.tool_for_kind(ToolKind::Task).map(|s| s.to_string()))
             };
             if let Some(task_tool) = task_tool {
-                for (title, est, lookahead) in candidates {
+                for (title, est, framing) in candidates {
                     let est_ok = est.is_none_or(|e| e >= ADJUTANT_MIN_EST_MINUTES);
                     if !est_ok {
                         continue;
@@ -810,7 +841,7 @@ impl xai_tool_runtime::Tool for MapUpdateTool {
                             .get_or_default::<crate::types::resources::State<AdjutantLedger>>();
                         ledger.0.drafted.push(title.clone());
                     }
-                    adjutant_note = Some(adjutant_draft(&task_tool, &title, lookahead));
+                    adjutant_note = Some(adjutant_draft(&task_tool, &title, framing));
                     break;
                 }
             }
@@ -1668,6 +1699,62 @@ mod tests {
             !text_of(out).contains("[compass adjutant]"),
             "one draft per phase, ever"
         );
+    }
+
+    #[tokio::test]
+    async fn adjutant_wait_slot_framing_on_waiting_declaration() {
+        use crate::types::template_renderer::TemplateRenderer;
+        let tmp = tempfile::tempdir().unwrap();
+        let mut res = resources_with_board(tmp.path());
+        res.insert(TemplateRenderer::new(
+            [(ToolKind::Task, "task".to_string())].into(),
+            Default::default(),
+        ));
+        let shared = res.into_shared();
+        xai_tool_runtime::Tool::run(
+            &MapUpdateTool,
+            test_ctx(shared.clone()),
+            MapUpdateInput {
+                north_star: Some("ship".into()),
+                why: Some("because".into()),
+                add_phases: vec!["collect samples overnight".into(), "analyze results".into()],
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        xai_tool_runtime::Tool::run(
+            &MapUpdateTool,
+            test_ctx(shared.clone()),
+            MapUpdateInput {
+                phase: Some(1),
+                status: Some(PhaseStatus::Active),
+                est_minutes: Some(30),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        // Declaring the wait offers the NEXT phase's scout with the
+        // zero-opportunity-cost framing.
+        let out = xai_tool_runtime::Tool::run(
+            &MapUpdateTool,
+            test_ctx(shared.clone()),
+            MapUpdateInput {
+                phase: Some(1),
+                status: Some(PhaseStatus::Waiting),
+                note: Some("overnight cron".into()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let text = text_of(out);
+        assert!(
+            text.contains("You are about to wait") && text.contains("'analyze results'"),
+            "wait-slot framing expected: {text}"
+        );
+        assert!(text.contains("costs you nothing"), "text: {text}");
     }
 
     #[test]
