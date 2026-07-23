@@ -24,6 +24,8 @@ cap_notes=$(n "grep -c 'no wait is declared' '$CH'")
 # waiting (the arguments field carries escaped JSON in chat_history).
 waiting_declared=$(n "grep -c 'status.\{0,6\}waiting' '$CH'")
 waiting_ever=$(n "grep -c 'waiting_on' '$CH'")
+duties_declared=$(n "grep -c 'status.\{0,6\}ongoing' '$CH'")
+duties_wired=$(n "grep -c 'under scheduled supervision' '$CH'")
 stuck_signals=$(n "grep -c 'Stuck signal' '$CH'")
 stuck_gate_hits=$(n "grep -c 'blocked by the stuck gate' '$CH'")
 scheduler_calls=$(grep -o '"name":"scheduler_create"' "$CH" 2>/dev/null | wc -l)
@@ -52,6 +54,8 @@ cat <<EOF
   "cap_notes": $cap_notes,
   "waiting_phase_declared": $waiting_declared,
   "waiting_mentions": $waiting_ever,
+  "duties_declared": $duties_declared,
+  "duties_wired": $duties_wired,
   "stuck_signals": $stuck_signals,
   "stuck_gate_hits": $stuck_gate_hits,
   "scheduler_calls": $scheduler_calls,

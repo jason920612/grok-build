@@ -54,6 +54,13 @@ pub enum PhaseStatus {
     /// Physically blocked on an external process (cron, long build, another
     /// party). Correct behavior is to do nothing and process results later.
     Waiting,
+    /// A standing duty with no finish line (service upkeep, live trading
+    /// rhythm, monitoring). Never "completes" — it is either healthy or
+    /// broken. Declaring it atomically wires a scheduled check-in, so a
+    /// goal can land (project delivered) while the duty stays supervised
+    /// in orbit; marking it `done` (with evidence) dissolves the duty and
+    /// deletes its schedule.
+    Ongoing,
     Done,
 }
 
@@ -63,6 +70,7 @@ impl PhaseStatus {
             Self::Pending => "pending",
             Self::Active => "active",
             Self::Waiting => "waiting",
+            Self::Ongoing => "ongoing",
             Self::Done => "done",
         }
     }
@@ -85,9 +93,15 @@ pub struct Phase {
     /// Evidence backing completion (required for `done`, spot-checked).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub evidence: Vec<String>,
-    /// Free-form context, e.g. what a waiting phase is waiting on.
+    /// Free-form context, e.g. what a waiting phase is waiting on, or what
+    /// an ongoing duty consists of (feeds its check-in prompt).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub note: Option<String>,
+    /// Scheduler task id of the duty check-in wired when this phase became
+    /// `ongoing`. Framework-managed: set at declaration, deleted (with the
+    /// schedule) when the duty is dissolved.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub check_in_task_id: Option<String>,
 }
 
 /// The whole mission map (`mission.json`).
@@ -224,6 +238,18 @@ fn render_mission(mission: &Mission, idea_count: usize) -> String {
                             line.push_str(&format!(" (est {est}m)"));
                         }
                     }
+                }
+                PhaseStatus::Ongoing => {
+                    if let Some(started) = &p.started_ts
+                        && let Some(mins) = minutes_since(started)
+                    {
+                        line.push_str(&format!(" — standing duty for {mins}m"));
+                    }
+                    line.push_str(if p.check_in_task_id.is_some() {
+                        " (scheduled check-ins wired)"
+                    } else {
+                        " (NO check-in schedule!)"
+                    });
                 }
                 PhaseStatus::Done => {
                     if !p.evidence.is_empty() {
@@ -442,7 +468,7 @@ pub struct MapUpdateInput {
     pub phase: Option<usize>,
 
     #[schemars(
-        description = "New status for the targeted phase: pending | active | waiting | done. active demotes any other active phase; waiting REQUIRES note (what you are waiting on); done REQUIRES evidence."
+        description = "New status for the targeted phase: pending | active | waiting | ongoing | done. active demotes any other active/waiting phase; waiting REQUIRES note (what you are waiting on); ongoing = a standing duty with no finish line — REQUIRES note (what the duty is) and automatically wires a scheduled check-in; done REQUIRES evidence (and dissolves an ongoing duty's schedule)."
     )]
     #[serde(default)]
     pub status: Option<PhaseStatus>,
@@ -458,10 +484,16 @@ pub struct MapUpdateInput {
     pub evidence: Vec<String>,
 
     #[schemars(
-        description = "Context note for the targeted phase, e.g. what a waiting phase waits on."
+        description = "Context note for the targeted phase, e.g. what a waiting phase waits on or what an ongoing duty consists of."
     )]
     #[serde(default)]
     pub note: Option<String>,
+
+    #[schemars(
+        description = "For status=ongoing: minutes between scheduled duty check-ins (default 30, clamped 5..1440)."
+    )]
+    #[serde(default)]
+    pub check_in_minutes: Option<u64>,
 
     #[schemars(description = "Open questions to add to the map.")]
     #[serde(default)]
@@ -604,6 +636,7 @@ impl xai_tool_runtime::Tool for MapUpdateTool {
                     completed_ts: None,
                     evidence: Vec::new(),
                     note: None,
+                    check_in_task_id: None,
                 });
             }
         }
@@ -669,6 +702,18 @@ impl xai_tool_runtime::Tool for MapUpdateTool {
                             mission.phases[idx].started_ts = Some(now_rfc3339());
                         }
                     }
+                    PhaseStatus::Ongoing => {
+                        if input.note.is_none() && mission.phases[idx].note.is_none() {
+                            return Err(xai_tool_runtime::ToolError::invalid_arguments(
+                                "Marking a phase ongoing (a standing duty) requires note = \
+                                 what the duty is — it feeds the scheduled check-in prompt."
+                                    .to_string(),
+                            ));
+                        }
+                        if mission.phases[idx].started_ts.is_none() {
+                            mission.phases[idx].started_ts = Some(now_rfc3339());
+                        }
+                    }
                     PhaseStatus::Active => {
                         // Only one phase runs at a time.
                         for (i, p) in mission.phases.iter_mut().enumerate() {
@@ -723,6 +768,57 @@ impl xai_tool_runtime::Tool for MapUpdateTool {
         resolve(&mut mission.open_questions, &input.resolve_questions);
         resolve(&mut mission.assumptions, &input.resolve_assumptions);
         resolve(&mut mission.risks, &input.resolve_risks);
+
+        // Duty handoff: declaring an ongoing duty atomically wires its
+        // scheduled check-in — supervision must not depend on the model
+        // remembering (observed variance: one run created check-ins, the
+        // next forgot). Dissolving the duty (done) deletes the schedule.
+        let mut duty_ack = None;
+        if let Some((t, PhaseStatus::Ongoing)) = &phase_transition {
+            if let Some(idx) = mission
+                .phases
+                .iter()
+                .position(|p| p.title == *t && p.status == PhaseStatus::Ongoing)
+            {
+                let minutes = input
+                    .check_in_minutes
+                    .unwrap_or(DUTY_CHECK_IN_DEFAULT_MINUTES)
+                    .clamp(DUTY_CHECK_IN_MIN_MINUTES, DUTY_CHECK_IN_MAX_MINUTES);
+                let note = mission.phases[idx].note.clone().unwrap_or_default();
+                match schedule_duty_check_in(&resources, t, &note, minutes).await {
+                    Some(id) => {
+                        mission.phases[idx].check_in_task_id = Some(id.clone());
+                        duty_ack = Some(format!(
+                            "\nDuty handoff: '{t}' is now under scheduled supervision — \
+                             check-in every {minutes}m (schedule id {id}). The project goal \
+                             can complete; the duty stays in orbit."
+                        ));
+                    }
+                    None => {
+                        duty_ack = Some(format!(
+                            "\nDuty '{t}' declared, but NO scheduler is available in this \
+                             session — supervision is not wired. Establish your own check-in \
+                             rhythm if this environment supports one."
+                        ));
+                    }
+                }
+            }
+        }
+        if let Some((t, PhaseStatus::Done)) = &phase_transition {
+            if let Some(idx) = mission.phases.iter().position(|p| p.title == *t) {
+                if let Some(id) = mission.phases[idx].check_in_task_id.take() {
+                    let deleted = delete_duty_check_in(&resources, &id).await;
+                    duty_ack = Some(format!(
+                        "\nDuty dissolved: schedule {id} {}.",
+                        if deleted {
+                            "deleted"
+                        } else {
+                            "could not be deleted — remove it with scheduler_delete"
+                        }
+                    ));
+                }
+            }
+        }
 
         mission.updated_ts = now_rfc3339();
         write_mission(path.clone(), mission.clone())
@@ -865,11 +961,88 @@ impl xai_tool_runtime::Tool for MapUpdateTool {
                 ));
             }
         }
+        if let Some(note) = duty_ack {
+            msg.push_str(&note);
+        }
         if let Some(note) = adjutant_note {
             msg.push_str(&note);
         }
         Ok(ToolOutput::Text(msg.into()))
     }
+}
+
+// ── Duties (standing phases with scheduled check-ins) ───────────────────
+
+const DUTY_CHECK_IN_DEFAULT_MINUTES: u64 = 30;
+const DUTY_CHECK_IN_MIN_MINUTES: u64 = 5;
+const DUTY_CHECK_IN_MAX_MINUTES: u64 = 1440;
+
+/// The prompt each scheduled duty check-in fires as a foreground turn.
+/// Scoped tightly: verify real health, repair, update the map — and
+/// nothing else. Dissolution instructions close the loop (marking the
+/// phase done deletes this very schedule).
+fn duty_check_in_prompt(title: &str, note: &str) -> String {
+    format!(
+        "Duty check-in for standing duty '{title}' ({note}). Verify the duty is ACTUALLY \
+         healthy: read its logs/state, check its processes, repair anything broken, and \
+         update the mission map with what you found. A healthy duty needs nothing beyond \
+         this check — do not invent extra work. If the duty is obsolete, dissolve it: mark \
+         its phase done with evidence (map_update), which deletes this schedule \
+         automatically."
+    )
+}
+
+/// Create the recurring check-in for a declared duty. `None` when no
+/// scheduler is wired into this session (tests, minimal hosts) — callers
+/// surface that honestly instead of pretending supervision exists.
+async fn schedule_duty_check_in(
+    resources: &crate::types::resources::SharedResources,
+    title: &str,
+    note: &str,
+    minutes: u64,
+) -> Option<String> {
+    use super::scheduler::types::{ScheduledTask, SchedulerCommand, SchedulerHandle};
+    let sender = {
+        let res = resources.lock().await;
+        res.get::<SchedulerHandle>()?.0.clone()
+    };
+    let mut task = ScheduledTask::new(minutes * 60, duty_check_in_prompt(title, note), true, false);
+    // Check-ins need the conversation's context (map, board, prior state),
+    // so they run as foreground turns, not detached subagents.
+    task.foreground = true;
+    let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+    sender
+        .send(SchedulerCommand::Create {
+            task,
+            reply: reply_tx,
+        })
+        .ok()?;
+    reply_rx.await.ok()?.ok().map(|t| t.id)
+}
+
+/// Delete a duty's check-in schedule on dissolution. Best-effort.
+async fn delete_duty_check_in(
+    resources: &crate::types::resources::SharedResources,
+    id: &str,
+) -> bool {
+    use super::scheduler::types::{SchedulerCommand, SchedulerHandle};
+    let Some(sender) = ({
+        let res = resources.lock().await;
+        res.get::<SchedulerHandle>().map(|h| h.0.clone())
+    }) else {
+        return false;
+    };
+    let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+    if sender
+        .send(SchedulerCommand::Delete {
+            id: id.to_string(),
+            reply: reply_tx,
+        })
+        .is_err()
+    {
+        return false;
+    }
+    matches!(reply_rx.await, Ok(Ok(true)))
 }
 
 // ── map_read ────────────────────────────────────────────────────────────
@@ -1132,13 +1305,31 @@ impl Reminder for OrientationReminder {
                     }
                 }
             }
-            None if total > 0 && done < total => {
-                msg.push_str(
-                    "\nNo phase is marked active — mark the one you are actually working on \
-                     (map_update) so the map stays true.",
-                );
+            None => {
+                let has_pending = mission
+                    .phases
+                    .iter()
+                    .any(|p| p.status == PhaseStatus::Pending);
+                let duties = mission
+                    .phases
+                    .iter()
+                    .filter(|p| p.status == PhaseStatus::Ongoing)
+                    .count();
+                if has_pending {
+                    msg.push_str(
+                        "\nNo phase is marked active — mark the one you are actually working \
+                         on (map_update) so the map stays true.",
+                    );
+                } else if duties > 0 {
+                    // Steady duty state is healthy, not a gap: the duties run
+                    // on their scheduled check-ins; no nagging.
+                    msg.push_str(&format!(
+                        "\n{duties} standing dut{} on scheduled check-ins — steady state; no \
+                         active phase needed.",
+                        if duties == 1 { "y" } else { "ies" }
+                    ));
+                }
             }
-            None => {}
         }
         if !mission.open_questions.is_empty() {
             msg.push_str(&format!(
@@ -1755,6 +1946,182 @@ mod tests {
             "wait-slot framing expected: {text}"
         );
         assert!(text.contains("costs you nothing"), "text: {text}");
+    }
+
+    /// Fake scheduler actor: echoes creates (tasks carry real generated ids)
+    /// and confirms deletes, recording them for assertions.
+    fn fake_scheduler(
+        res: &mut Resources,
+    ) -> std::sync::Arc<parking_lot::Mutex<(Vec<String>, Vec<String>)>> {
+        use crate::implementations::grok_build::scheduler::types::{
+            SchedulerCommand, SchedulerHandle,
+        };
+        let log = std::sync::Arc::new(parking_lot::Mutex::new((Vec::new(), Vec::new())));
+        let log2 = log.clone();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        res.insert(SchedulerHandle(tx));
+        tokio::spawn(async move {
+            while let Some(cmd) = rx.recv().await {
+                match cmd {
+                    SchedulerCommand::Create { task, reply } => {
+                        log2.lock().0.push(task.prompt.clone());
+                        let _ = reply.send(Ok(task));
+                    }
+                    SchedulerCommand::Delete { id, reply } => {
+                        log2.lock().1.push(id);
+                        let _ = reply.send(Ok(true));
+                    }
+                    _ => {}
+                }
+            }
+        });
+        log
+    }
+
+    #[tokio::test]
+    async fn ongoing_duty_wires_check_in_and_done_dissolves_it() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut res = resources_with_board(tmp.path());
+        let sched_log = fake_scheduler(&mut res);
+        let shared = res.into_shared();
+        xai_tool_runtime::Tool::run(
+            &MapUpdateTool,
+            test_ctx(shared.clone()),
+            MapUpdateInput {
+                north_star: Some("keep the service alive".into()),
+                why: Some("ops duty".into()),
+                add_phases: vec!["live trading rhythm".into()],
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+        // Ongoing without a note is refused.
+        let err = xai_tool_runtime::Tool::run(
+            &MapUpdateTool,
+            test_ctx(shared.clone()),
+            MapUpdateInput {
+                phase: Some(1),
+                status: Some(PhaseStatus::Ongoing),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap_err();
+        assert!(err.to_string().contains("ongoing"), "err: {err}");
+
+        // With a note: declaration atomically wires the scheduled check-in.
+        let out = xai_tool_runtime::Tool::run(
+            &MapUpdateTool,
+            test_ctx(shared.clone()),
+            MapUpdateInput {
+                phase: Some(1),
+                status: Some(PhaseStatus::Ongoing),
+                note: Some("paper-trade BTCUSDT, heartbeat ops.log".into()),
+                check_in_minutes: Some(10),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let text = text_of(out);
+        assert!(text.contains("under scheduled supervision"), "text: {text}");
+        assert!(text.contains("every 10m"), "text: {text}");
+        let created = sched_log.lock().0.clone();
+        assert_eq!(created.len(), 1, "exactly one check-in schedule");
+        assert!(created[0].contains("live trading rhythm"), "prompt: {}", created[0]);
+        assert!(created[0].contains("do not invent extra work"));
+        let mission = read_mission(tmp.path().join("mission.json"))
+            .await
+            .unwrap()
+            .unwrap();
+        let task_id = mission.phases[0].check_in_task_id.clone().expect("id stored");
+
+        // Activating another phase must NOT demote the duty.
+        xai_tool_runtime::Tool::run(
+            &MapUpdateTool,
+            test_ctx(shared.clone()),
+            MapUpdateInput {
+                add_phases: vec!["improve strategy".into()],
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        xai_tool_runtime::Tool::run(
+            &MapUpdateTool,
+            test_ctx(shared.clone()),
+            MapUpdateInput {
+                phase: Some(2),
+                status: Some(PhaseStatus::Active),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let mission = read_mission(tmp.path().join("mission.json"))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(mission.phases[0].status, PhaseStatus::Ongoing, "duty survives");
+
+        // Dissolving the duty deletes its schedule.
+        let out = xai_tool_runtime::Tool::run(
+            &MapUpdateTool,
+            test_ctx(shared.clone()),
+            MapUpdateInput {
+                phase: Some(1),
+                status: Some(PhaseStatus::Done),
+                evidence: vec!["ops.log: duty retired after handover -> archived".into()],
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let text = text_of(out);
+        assert!(text.contains("Duty dissolved"), "text: {text}");
+        assert_eq!(sched_log.lock().1, vec![task_id]);
+        let mission = read_mission(tmp.path().join("mission.json"))
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(mission.phases[0].check_in_task_id.is_none());
+    }
+
+    #[tokio::test]
+    async fn ongoing_without_scheduler_is_honest_about_it() {
+        let tmp = tempfile::tempdir().unwrap();
+        let shared = resources_with_board(tmp.path()).into_shared();
+        xai_tool_runtime::Tool::run(
+            &MapUpdateTool,
+            test_ctx(shared.clone()),
+            MapUpdateInput {
+                north_star: Some("x".into()),
+                why: Some("y".into()),
+                add_phases: vec!["watchdog".into()],
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let out = xai_tool_runtime::Tool::run(
+            &MapUpdateTool,
+            test_ctx(shared),
+            MapUpdateInput {
+                phase: Some(1),
+                status: Some(PhaseStatus::Ongoing),
+                note: Some("watch the thing".into()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let text = text_of(out);
+        assert!(
+            text.contains("NO scheduler is available"),
+            "must not pretend supervision exists: {text}"
+        );
     }
 
     #[test]
