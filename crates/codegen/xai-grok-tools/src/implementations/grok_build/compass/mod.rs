@@ -279,6 +279,16 @@ pub async fn declared_waiting(resources: &crate::types::resources::SharedResourc
 /// Phases estimated shorter than this don't get a scout draft.
 const ADJUTANT_MIN_EST_MINUTES: u64 = 5;
 
+/// Which phases already received a scout draft (registered + persisted so
+/// harness rebuilds don't re-draft). One draft per phase, ever: the
+/// commander saw the offer once; repeating it would be nagging.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct AdjutantLedger {
+    pub drafted: Vec<String>,
+}
+
+crate::register_resource!("grok_build", "CompassAdjutant", AdjutantLedger);
+
 /// Stable board-topic slug derived from a phase title.
 fn topic_slug(title: &str) -> String {
     let mapped: String = title
@@ -330,19 +340,43 @@ async fn board_covers(
 /// The ready-to-sign scout order. Concrete and complete on purpose: the
 /// barrier for delegation-shy models is composing a spawn from scratch,
 /// not executing one that is already written.
-fn adjutant_draft(task_tool: &str, title: &str) -> String {
+///
+/// `lookahead` frames the order as reconnaissance AHEAD of the advance —
+/// the next pending phase — which fixes the timing problem of models that
+/// update the map only after the work is done. Grounding against
+/// fantasy: the target is a phase title the model itself declared, and
+/// the scout carries an explicit no-speculation clause (nothing
+/// observable yet ⇒ post nothing); the board's evidence spot-check
+/// rejects uncited findings mechanically.
+fn adjutant_draft(task_tool: &str, title: &str, lookahead: bool) -> String {
     let topic = topic_slug(title);
+    let (situation, benefit) = if lookahead {
+        (
+            format!(
+                "The NEXT phase '{title}' has no verified reconnaissance on the board yet"
+            ),
+            "and its findings will already be waiting on the board when you get there",
+        )
+    } else {
+        (
+            format!(
+                "Phase '{title}' is now active with no verified findings on the board"
+            ),
+            "while you keep working — findings reach you via digest",
+        )
+    };
     format!(
-        "\n\n[compass adjutant] Phase '{title}' is now active with no verified findings on \
-         the board. A scout order is drafted and ready to sign:\n\
+        "\n\n[compass adjutant] {situation}. A scout order is drafted and ready to sign:\n\
          {task_tool}(subagent_type: \"explore\", run_in_background: true, description: \
          \"Scout: {title}\", prompt: \"Verify the current REAL state relevant to '{title}': \
          read the involved files/data and run read-only checks. Post your 1-3 most \
          load-bearing verified findings to the blackboard (board_post kind=finding, topic \
-         '{topic}') with evidence. Do not modify anything. End with a one-line summary.\")\n\
-         Sign it (call as drafted) and reconnaissance runs in parallel while you keep \
-         working — findings reach you via digest. Adapt the draft, or decline it if this \
-         phase is trivial: you are the commander; the draft only saves you the composing."
+         '{topic}') with evidence. If what this phase targets does not exist yet or cannot \
+         be observed yet, post NOTHING — never speculate; absence of findings is a valid \
+         result. Do not modify anything. End with a one-line summary.\")\n\
+         Sign it (call as drafted) and reconnaissance runs in parallel {benefit}. Adapt the \
+         draft, or decline it if the phase is trivial: you are the commander; the draft \
+         only saves you the composing."
     )
 }
 
@@ -718,31 +752,67 @@ impl xai_tool_runtime::Tool for MapUpdateTool {
             }
         }
 
-        // Adjutant: a phase just went active with no verified reconnaissance
-        // on the board — draft a ready-to-sign scout order. The model stays
-        // the commander (execute, adapt, or decline); this is advisory text
-        // whose only job is removing the activation energy of composing a
-        // delegation from scratch.
+        // Adjutant: on any phase transition, draft a ready-to-sign scout
+        // order for uncovered ground. Candidates in priority order:
+        // (1) the phase that just went active (its own reconnaissance is
+        //     missing), then
+        // (2) LOOKAHEAD — the next pending phase, so reconnaissance runs
+        //     ahead of the advance. This is the fix for models that update
+        //     the map only after the work is done: whatever just
+        //     transitioned, the next pending phase has by definition not
+        //     started, so its draft can never arrive post-hoc.
+        // The model stays the commander (execute, adapt, or decline); this
+        // is advisory text whose only job is removing the activation energy
+        // of composing a delegation from scratch. One draft per phase ever
+        // (AdjutantLedger) and at most one per call.
         let mut adjutant_note = None;
-        if let Some((title, PhaseStatus::Active)) = &phase_transition
-            && crate::guardrails::guardrails().adjutant
-        {
-            let est_ok = mission
+        if phase_transition.is_some() && crate::guardrails::guardrails().adjutant {
+            let mut candidates: Vec<(String, Option<u64>, bool)> = Vec::new();
+            if let Some((title, PhaseStatus::Active)) = &phase_transition {
+                let est = mission
+                    .phases
+                    .iter()
+                    .find(|p| p.title == *title)
+                    .and_then(|p| p.est_minutes);
+                candidates.push((title.clone(), est, false));
+            }
+            if let Some(next) = mission
                 .phases
                 .iter()
-                .find(|p| p.title == *title)
-                .and_then(|p| p.est_minutes)
-                .is_none_or(|e| e >= ADJUTANT_MIN_EST_MINUTES);
+                .find(|p| p.status == PhaseStatus::Pending)
+            {
+                candidates.push((next.title.clone(), next.est_minutes, true));
+            }
+
             let task_tool = {
                 let res = resources.lock().await;
                 res.get::<crate::types::template_renderer::TemplateRenderer>()
                     .and_then(|r| r.tool_for_kind(ToolKind::Task).map(|s| s.to_string()))
             };
-            if est_ok
-                && let Some(task_tool) = task_tool
-                && !board_covers(&resources, title).await
-            {
-                adjutant_note = Some(adjutant_draft(&task_tool, title));
+            if let Some(task_tool) = task_tool {
+                for (title, est, lookahead) in candidates {
+                    let est_ok = est.is_none_or(|e| e >= ADJUTANT_MIN_EST_MINUTES);
+                    if !est_ok {
+                        continue;
+                    }
+                    let already = {
+                        let mut res = resources.lock().await;
+                        let ledger = res
+                            .get_or_default::<crate::types::resources::State<AdjutantLedger>>();
+                        ledger.0.drafted.iter().any(|t| t == &title)
+                    };
+                    if already || board_covers(&resources, &title).await {
+                        continue;
+                    }
+                    {
+                        let mut res = resources.lock().await;
+                        let ledger = res
+                            .get_or_default::<crate::types::resources::State<AdjutantLedger>>();
+                        ledger.0.drafted.push(title.clone());
+                    }
+                    adjutant_note = Some(adjutant_draft(&task_tool, &title, lookahead));
+                    break;
+                }
             }
         }
 
@@ -1519,6 +1589,85 @@ mod tests {
         .await
         .unwrap();
         assert!(!text_of(out).contains("[compass adjutant]"));
+    }
+
+    #[tokio::test]
+    async fn adjutant_lookahead_drafts_next_pending_and_never_repeats() {
+        use crate::types::template_renderer::TemplateRenderer;
+        let tmp = tempfile::tempdir().unwrap();
+        let mut res = resources_with_board(tmp.path());
+        res.insert(TemplateRenderer::new(
+            [(ToolKind::Task, "task".to_string())].into(),
+            Default::default(),
+        ));
+        let shared = res.into_shared();
+        xai_tool_runtime::Tool::run(
+            &MapUpdateTool,
+            test_ctx(shared.clone()),
+            MapUpdateInput {
+                north_star: Some("ship".into()),
+                why: Some("because".into()),
+                add_phases: vec!["audit legacy auth flow".into(), "harden session storage".into()],
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+        // Activating phase 1 drafts for phase 1 itself (in-place framing).
+        let out = xai_tool_runtime::Tool::run(
+            &MapUpdateTool,
+            test_ctx(shared.clone()),
+            MapUpdateInput {
+                phase: Some(1),
+                status: Some(PhaseStatus::Active),
+                est_minutes: Some(10),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let text = text_of(out);
+        assert!(text.contains("'audit legacy auth flow' is now active"), "text: {text}");
+
+        // Marking it done LOOKAHEAD-drafts for the next pending phase, so
+        // reconnaissance runs ahead of the advance.
+        let out = xai_tool_runtime::Tool::run(
+            &MapUpdateTool,
+            test_ctx(shared.clone()),
+            MapUpdateInput {
+                phase: Some(1),
+                status: Some(PhaseStatus::Done),
+                evidence: vec!["command: audit-run -> 0 criticals".into()],
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let text = text_of(out);
+        assert!(
+            text.contains("The NEXT phase 'harden session storage'"),
+            "lookahead draft expected: {text}"
+        );
+        assert!(text.contains("post NOTHING"), "no-speculation clause: {text}");
+
+        // Activating phase 2 later never re-drafts it (ledger).
+        let out = xai_tool_runtime::Tool::run(
+            &MapUpdateTool,
+            test_ctx(shared.clone()),
+            MapUpdateInput {
+                phase: Some(2),
+                status: Some(PhaseStatus::Active),
+                est_minutes: Some(10),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        assert!(
+            !text_of(out).contains("[compass adjutant]"),
+            "one draft per phase, ever"
+        );
     }
 
     #[test]
