@@ -274,6 +274,78 @@ pub async fn declared_waiting(resources: &crate::types::resources::SharedResourc
     matches!(read_mission(path).await, Ok(Some(m)) if m.is_waiting())
 }
 
+// ── Adjutant (draft delegation orders) ──────────────────────────────────
+
+/// Phases estimated shorter than this don't get a scout draft.
+const ADJUTANT_MIN_EST_MINUTES: u64 = 5;
+
+/// Stable board-topic slug derived from a phase title.
+fn topic_slug(title: &str) -> String {
+    let mapped: String = title
+        .to_ascii_lowercase()
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+        .collect();
+    let joined = mapped
+        .split('-')
+        .filter(|w| !w.is_empty())
+        .collect::<Vec<_>>()
+        .join("-");
+    joined.chars().take(32).collect()
+}
+
+/// Whether the board already carries verified reconnaissance overlapping a
+/// phase title (any finding/test_result sharing a significant word). Cheap
+/// word-overlap heuristic: its only job is deduplicating scout drafts.
+async fn board_covers(
+    resources: &crate::types::resources::SharedResources,
+    title: &str,
+) -> bool {
+    let path = {
+        let res = resources.lock().await;
+        res.get::<BlackboardCfg>().map(|c| c.path.clone())
+    };
+    let Some(path) = path else { return false };
+    let Ok(entries) = super::blackboard::read_entries_for_compass(path).await else {
+        return false;
+    };
+    let words: Vec<String> = title
+        .to_ascii_lowercase()
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .filter(|w| w.len() >= 5)
+        .map(str::to_string)
+        .collect();
+    if words.is_empty() {
+        return false;
+    }
+    entries
+        .iter()
+        .filter(|e| matches!(e.kind, EntryKind::Finding | EntryKind::TestResult))
+        .any(|e| {
+            let hay = format!("{} {}", e.topic, e.body).to_ascii_lowercase();
+            words.iter().any(|w| hay.contains(w.as_str()))
+        })
+}
+
+/// The ready-to-sign scout order. Concrete and complete on purpose: the
+/// barrier for delegation-shy models is composing a spawn from scratch,
+/// not executing one that is already written.
+fn adjutant_draft(task_tool: &str, title: &str) -> String {
+    let topic = topic_slug(title);
+    format!(
+        "\n\n[compass adjutant] Phase '{title}' is now active with no verified findings on \
+         the board. A scout order is drafted and ready to sign:\n\
+         {task_tool}(subagent_type: \"explore\", run_in_background: true, description: \
+         \"Scout: {title}\", prompt: \"Verify the current REAL state relevant to '{title}': \
+         read the involved files/data and run read-only checks. Post your 1-3 most \
+         load-bearing verified findings to the blackboard (board_post kind=finding, topic \
+         '{topic}') with evidence. Do not modify anything. End with a one-line summary.\")\n\
+         Sign it (call as drafted) and reconnaissance runs in parallel while you keep \
+         working — findings reach you via digest. Adapt the draft, or decline it if this \
+         phase is trivial: you are the commander; the draft only saves you the composing."
+    )
+}
+
 /// Count idea-box entries on the shared board (best-effort; 0 on error).
 async fn idea_count(res: &crate::types::resources::SharedResources) -> usize {
     let path = {
@@ -646,6 +718,34 @@ impl xai_tool_runtime::Tool for MapUpdateTool {
             }
         }
 
+        // Adjutant: a phase just went active with no verified reconnaissance
+        // on the board — draft a ready-to-sign scout order. The model stays
+        // the commander (execute, adapt, or decline); this is advisory text
+        // whose only job is removing the activation energy of composing a
+        // delegation from scratch.
+        let mut adjutant_note = None;
+        if let Some((title, PhaseStatus::Active)) = &phase_transition
+            && crate::guardrails::guardrails().adjutant
+        {
+            let est_ok = mission
+                .phases
+                .iter()
+                .find(|p| p.title == *title)
+                .and_then(|p| p.est_minutes)
+                .is_none_or(|e| e >= ADJUTANT_MIN_EST_MINUTES);
+            let task_tool = {
+                let res = resources.lock().await;
+                res.get::<crate::types::template_renderer::TemplateRenderer>()
+                    .and_then(|r| r.tool_for_kind(ToolKind::Task).map(|s| s.to_string()))
+            };
+            if est_ok
+                && let Some(task_tool) = task_tool
+                && !board_covers(&resources, title).await
+            {
+                adjutant_note = Some(adjutant_draft(&task_tool, title));
+            }
+        }
+
         // Phase transitions are the natural decision points where the silent
         // idea box surfaces.
         let ideas = if phase_transition.is_some() {
@@ -663,6 +763,9 @@ impl xai_tool_runtime::Tool for MapUpdateTool {
                      suggestions, not tasks."
                 ));
             }
+        }
+        if let Some(note) = adjutant_note {
+            msg.push_str(&note);
         }
         Ok(ToolOutput::Text(msg.into()))
     }
@@ -1273,6 +1376,155 @@ mod tests {
         .await
         .unwrap_err();
         assert!(err.to_string().contains("does not exist"), "err: {err}");
+    }
+
+    #[tokio::test]
+    async fn adjutant_drafts_scout_order_on_activation() {
+        use crate::types::template_renderer::TemplateRenderer;
+        let tmp = tempfile::tempdir().unwrap();
+        let mut res = resources_with_board(tmp.path());
+        res.insert(TemplateRenderer::new(
+            [(ToolKind::Task, "task".to_string())].into(),
+            Default::default(),
+        ));
+        let shared = res.into_shared();
+        xai_tool_runtime::Tool::run(
+            &MapUpdateTool,
+            test_ctx(shared.clone()),
+            MapUpdateInput {
+                north_star: Some("ship".into()),
+                why: Some("because".into()),
+                add_phases: vec!["investigate flaky pipeline".into(), "tiny cleanup".into()],
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+        // Activation without board coverage -> draft, addressed as commander.
+        let out = xai_tool_runtime::Tool::run(
+            &MapUpdateTool,
+            test_ctx(shared.clone()),
+            MapUpdateInput {
+                phase: Some(1),
+                status: Some(PhaseStatus::Active),
+                est_minutes: Some(20),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let text = text_of(out);
+        assert!(text.contains("[compass adjutant]"), "text: {text}");
+        assert!(
+            text.contains("task(subagent_type: \"explore\""),
+            "draft must be a concrete signable call: {text}"
+        );
+        assert!(text.contains("you are the commander"), "text: {text}");
+
+        // A short phase never gets a draft.
+        let out = xai_tool_runtime::Tool::run(
+            &MapUpdateTool,
+            test_ctx(shared.clone()),
+            MapUpdateInput {
+                phase: Some(2),
+                status: Some(PhaseStatus::Active),
+                est_minutes: Some(2),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        assert!(!text_of(out).contains("[compass adjutant]"));
+    }
+
+    #[tokio::test]
+    async fn adjutant_skips_when_board_covered_or_no_task_tool() {
+        use crate::types::template_renderer::TemplateRenderer;
+        let tmp = tempfile::tempdir().unwrap();
+        let mut res = resources_with_board(tmp.path());
+        res.insert(TemplateRenderer::new(
+            [(ToolKind::Task, "task".to_string())].into(),
+            Default::default(),
+        ));
+        let shared = res.into_shared();
+        // A finding overlapping the phase title already on the board.
+        xai_tool_runtime::Tool::run(
+            &crate::implementations::grok_build::blackboard::BoardPostTool,
+            test_ctx(shared.clone()),
+            serde_json::from_value(serde_json::json!({
+                "kind": "finding",
+                "topic": "pipeline",
+                "body": "the flaky pipeline reproduces on retry 3",
+                "evidence": ["command: ci-run -> failed at step 4"]
+            }))
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+        xai_tool_runtime::Tool::run(
+            &MapUpdateTool,
+            test_ctx(shared.clone()),
+            MapUpdateInput {
+                north_star: Some("ship".into()),
+                why: Some("because".into()),
+                add_phases: vec!["investigate flaky pipeline".into()],
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let out = xai_tool_runtime::Tool::run(
+            &MapUpdateTool,
+            test_ctx(shared.clone()),
+            MapUpdateInput {
+                phase: Some(1),
+                status: Some(PhaseStatus::Active),
+                est_minutes: Some(20),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        assert!(
+            !text_of(out).contains("[compass adjutant]"),
+            "covered board must suppress the draft"
+        );
+
+        // No task tool in the toolset -> never draft an unexecutable order.
+        let tmp2 = tempfile::tempdir().unwrap();
+        let shared2 = resources_with_board(tmp2.path()).into_shared();
+        xai_tool_runtime::Tool::run(
+            &MapUpdateTool,
+            test_ctx(shared2.clone()),
+            MapUpdateInput {
+                north_star: Some("ship".into()),
+                why: Some("because".into()),
+                add_phases: vec!["investigate flaky pipeline".into()],
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let out = xai_tool_runtime::Tool::run(
+            &MapUpdateTool,
+            test_ctx(shared2),
+            MapUpdateInput {
+                phase: Some(1),
+                status: Some(PhaseStatus::Active),
+                est_minutes: Some(20),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        assert!(!text_of(out).contains("[compass adjutant]"));
+    }
+
+    #[test]
+    fn topic_slug_is_stable_and_bounded() {
+        assert_eq!(topic_slug("Analyze trends & write report!"), "analyze-trends-write-report");
+        assert!(topic_slug(&"x".repeat(100)).len() <= 32);
     }
 
     #[test]

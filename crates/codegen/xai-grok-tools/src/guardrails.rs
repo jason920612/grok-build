@@ -42,6 +42,12 @@ pub struct Guardrails {
     /// agent posts a reflective board entry. Soft stuck guidance (appended
     /// to the triggering error) is permanent capability and not gated here.
     pub stuck_gate: bool,
+    /// When a mission phase activates with no verified reconnaissance on
+    /// the board, `map_update`'s ack includes a ready-to-sign scout order
+    /// draft. Elicits delegation from models whose post-training tendency
+    /// is to do everything solo — the model stays the commander (execute,
+    /// adapt, or decline); pure advisory text, no gate.
+    pub adjutant: bool,
 }
 
 impl Default for Guardrails {
@@ -53,6 +59,7 @@ impl Default for Guardrails {
             goal_block_cap: true,
             evidence_spot_check: true,
             stuck_gate: true,
+            adjutant: true,
         }
     }
 }
@@ -75,6 +82,7 @@ fn resolve_from_env() -> Guardrails {
             goal_block_cap: false,
             evidence_spot_check: false,
             stuck_gate: false,
+            adjutant: false,
         },
         _ => Guardrails::default(),
     };
@@ -100,6 +108,9 @@ fn resolve_from_env() -> Guardrails {
     }
     if let Some(v) = env_flag("GROK_GUARDRAIL_STUCK_GATE") {
         g.stuck_gate = v;
+    }
+    if let Some(v) = env_flag("GROK_GUARDRAIL_ADJUTANT") {
+        g.adjutant = v;
     }
     g
 }
