@@ -20,8 +20,10 @@ own_findings=$(n "grep -c '\"kind\":\"finding\"' '$BB'")
 ideas=$(n "grep -c '\"kind\":\"idea\"' '$BB'")
 compass_blocks=$(n "grep -c '\[compass\]' '$CH'")
 cap_notes=$(n "grep -c 'no wait is declared' '$CH'")
-waiting_declared=$(n "grep -c '\"status\": \"waiting\"' '$MJ'")
-waiting_ever=$(n "grep -c '\"waiting\"' '$CH'")
+# Historical, not point-in-time: count map_update calls that set a phase to
+# waiting (the arguments field carries escaped JSON in chat_history).
+waiting_declared=$(n "grep -c 'status.\{0,6\}waiting' '$CH'")
+waiting_ever=$(n "grep -c 'waiting_on' '$CH'")
 stuck_signals=$(n "grep -c 'Stuck signal' '$CH'")
 stuck_gate_hits=$(n "grep -c 'blocked by the stuck gate' '$CH'")
 scheduler_calls=$(grep -o '"name":"scheduler_create"' "$CH" 2>/dev/null | wc -l)
