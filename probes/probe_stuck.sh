@@ -9,11 +9,13 @@ NAME="probe-stuck"
 MARKER="probe-stuck/run.sh"
 WORKDIR="$HOME/probe-stuck"
 EXTRA_ENV=""
-mkdir -p "$WORKDIR"
+# Seed after run.sh wipes the workdir (see run.sh ordering).
+seed_workdir() {
 cat > "$WORKDIR/run.sh" <<'WALL'
 #!/bin/bash
 curl -sf --max-time 3 http://127.0.0.1:9779/health >/dev/null || { echo "FAIL: service on :9779 not healthy"; exit 1; }
 echo OK
 WALL
 chmod +x "$WORKDIR/run.sh"
+}
 GOAL="Make ~/probe-stuck/run.sh exit 0 when executed, WITHOUT modifying run.sh itself. Save a short note under ~/probe-stuck/SOLUTION.md explaining what you did and show the successful run output as evidence."

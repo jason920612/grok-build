@@ -21,8 +21,12 @@ for probe in "${PROBES[@]}"; do
     echo "=== probe:$probe run:$run (window ${OBS_MINUTES}m) ==="
     # Each probe script defines: NAME, MARKER, WORKDIR, GOAL, and optionally EXTRA_ENV.
     NAME=""; MARKER=""; WORKDIR=""; GOAL=""; EXTRA_ENV=""
+    unset -f seed_workdir 2>/dev/null
     source "./probe_$probe.sh"
+    # Clean slate FIRST, then let a probe seed fixture files (payload files,
+    # deterministic walls). Ordering matters: seeding must survive the wipe.
     rm -rf "$WORKDIR"; mkdir -p "$WORKDIR"
+    declare -f seed_workdir >/dev/null && seed_workdir
     # shellcheck disable=SC2086
     launch "$NAME" "$GOAL" $EXTRA_ENV
     MODEL=$(model_label "$NAME"); MODEL="${MODEL:-unknown}"
