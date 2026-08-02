@@ -44,6 +44,20 @@ pub struct RuleInjectionState {
 crate::register_resource!("grok_build", "RuleInjectionState", RuleInjectionState);
 
 impl RuleInjectionState {
+    /// Forget which packs have fired, keeping the call counter.
+    ///
+    /// Required on session resume. The ledger is persisted, but the seals in
+    /// a resumed transcript are not trusted — `ChatState::new` strips them,
+    /// because bytes loaded from a file cannot carry authority. Without this
+    /// reset the two behaviors combine into the worst case: the transcript's
+    /// rule blocks are demoted to plain data while the ledger still claims
+    /// every pack has fired, so a resumed session would run with no rules in
+    /// force at all — fire-once packs never returning, gap packs silent
+    /// until their interval elapses.
+    pub fn reset_for_resume(&mut self) {
+        self.last_fired.clear();
+    }
+
     fn due(&self, pack: &str, gap: Option<u64>) -> bool {
         match (self.last_fired.get(pack), gap) {
             (None, _) => true,
@@ -343,6 +357,37 @@ mod tests {
         )
         .await;
         assert!(third.contains("<action_safety>"), "refreshed after gap");
+    }
+
+    /// Resume must not trade safety for silence. `ChatState::new` strips
+    /// the seals off a loaded transcript, so if the persisted ledger kept
+    /// claiming every pack had fired, a resumed session would run with no
+    /// rules in force at all — the fire-once doctrine pack worst of all,
+    /// since it would never come back.
+    #[tokio::test]
+    async fn resume_reset_makes_fire_once_packs_return() {
+        let res = test_resources_with_renderer();
+        let first =
+            append_due_rules(String::new(), Some(ToolKind::Read), &res, "system-reminder").await;
+        assert!(first.contains("<project_instructions_spec>"));
+
+        // Without the reset the ledger says "already fired" forever.
+        let replay =
+            append_due_rules(String::new(), Some(ToolKind::Read), &res, "system-reminder").await;
+        assert!(!replay.contains("<project_instructions_spec>"));
+
+        {
+            let mut r = res.lock().await;
+            r.get_or_default::<State<RuleInjectionState>>()
+                .reset_for_resume();
+        }
+        let resumed =
+            append_due_rules(String::new(), Some(ToolKind::Read), &res, "system-reminder").await;
+        assert!(
+            resumed.contains("<project_instructions_spec>"),
+            "a resumed session must get its rules back: {resumed}"
+        );
+        assert!(resumed.contains("<tool_calling>"), "core pack too");
     }
 
     #[tokio::test]

@@ -1504,16 +1504,58 @@ impl WorkspaceOps {
                             client.mark_disconnected();
                         }
                     })?;
-                serde_json::from_value::<ToolRunResult>(typed.value).map_err(|e| {
+                let remote = serde_json::from_value::<ToolRunResult>(typed.value).map_err(|e| {
                     xai_tool_runtime::ToolError::custom(
                         "tool_result_deserialize",
                         format!("tool result deserialization failed: {e}"),
                     )
-                })
+                })?;
+                Ok(localize_proxy_result(remote, name))
             }
         }
     }
 }
+/// Re-derive a proxied tool result's model-facing text locally.
+///
+/// A remote workspace server hands back a fully-formed [`ToolRunResult`],
+/// `prompt_text` included. That string never passed through *this* process's
+/// finalize step, so trusting it would let whatever is on the other end of
+/// the socket mint harness authority — sealed instruction blocks, forged
+/// reminders — simply by putting them in the response. The bytes crossed a
+/// trust boundary, so the framing they carry cannot be trusted with them.
+///
+/// The split applied here: the remote supplies the **payload** (the typed
+/// `ToolOutput`, which is structured data), and this process decides how it
+/// is **presented** to the model. So the remote's `prompt_text` is discarded
+/// and rebuilt from the structured output, then stripped of harness-reserved
+/// code points and fenced as external data.
+///
+/// Not yet local: reminders and sealed rule packs, which the local
+/// [`finalize_output`](xai_grok_tools::registry::types) tail applies from a
+/// toolset's resources. A `Proxy` holds only a transport client — no local
+/// toolset, no resource handle — so applying them here would mean threading
+/// session resources through the proxy path or hoisting the authority step
+/// above `call_tool` for both arms. Until then a proxied call carries no
+/// rule packs and does not advance the local pack ledger.
+fn localize_proxy_result(remote: ToolRunResult, tool_name: &str) -> ToolRunResult {
+    let derived = remote.output.to_prompt_format();
+    let stripped = xai_grok_tools::sentinel::strip_reserved(&derived).0;
+    let sanitized = xai_grok_tools::antiinjection::sanitize_untrusted(&stripped).0;
+    let prompt_text = if xai_grok_tools::guardrails::guardrails().antiinjection {
+        xai_grok_tools::antiinjection::fence_untrusted_output(
+            &sanitized,
+            &format!("remote-workspace:{tool_name}"),
+        )
+    } else {
+        sanitized
+    };
+    ToolRunResult {
+        output: remote.output,
+        prompt_text,
+        effective_tool_name: remote.effective_tool_name,
+    }
+}
+
 #[cfg(any(test, feature = "test-support"))]
 impl WorkspaceOps {
     /// Test variant backed by a temp dir.

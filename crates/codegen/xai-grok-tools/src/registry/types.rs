@@ -1082,7 +1082,21 @@ impl ToolRegistryBuilder {
             .unwrap_or(&ctx.state_path)
             .join("resources_state.json");
         let persistence = Arc::new(ResourcesPersistence::new(resources_state_path));
-        persistence.load(&mut resources);
+        let restored = persistence.load(&mut resources);
+        if restored {
+            // The rule ledger survives in the state file, but the seals in a
+            // resumed transcript do not (`ChatState::new` strips them —
+            // storage cannot confer authority). Carrying the ledger over
+            // unchanged would leave the session believing every pack had
+            // already fired while none of them are still in force, so the
+            // ledger forgets what fired and the packs re-establish
+            // themselves on the first tool call of the resumed session.
+            resources
+                .get_or_default::<crate::types::resources::State<
+                    crate::rule_injection::RuleInjectionState,
+                >>()
+                .reset_for_resume();
+        }
         let preset_name = config.behavior_preset.as_deref().unwrap_or("current");
         let local_registry = self.shared_local_registry.take().unwrap_or_default();
         for tool_config in &config.tools {

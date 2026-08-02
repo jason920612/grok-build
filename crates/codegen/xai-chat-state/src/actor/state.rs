@@ -208,6 +208,20 @@ impl ChatState {
     /// lack matching `ToolResult` entries. Without this, the in-memory state
     /// would carry broken conversation history until the next `build_request`.
     pub fn new(mut conversation: Vec<ConversationItem>, sampling_config: SamplingConfig) -> Self {
+        // A resumed conversation arrives from disk, so every seal in it is
+        // just bytes in a file — indistinguishable from one an editor typed
+        // in, and equally indistinguishable from one written by a different
+        // build. Authority cannot be inherited from storage, so all of it is
+        // dropped here and the live channel re-establishes the rules on the
+        // next tool call (see `reset_rule_ledger_for_resume` on the tools
+        // side, without which the fire-once packs would never come back).
+        let stripped = super::mutations::strip_reserved_from_conversation(&mut conversation);
+        if stripped > 0 {
+            tracing::info!(
+                stripped_items = stripped,
+                "Dropped harness-reserved code points from a loaded conversation"
+            );
+        }
         let deduped = dedup_duplicate_tool_results(&mut conversation);
         if deduped > 0 {
             tracing::info!(
