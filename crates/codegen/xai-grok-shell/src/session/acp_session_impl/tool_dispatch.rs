@@ -407,5 +407,11 @@ pub(super) fn build_tool_parse_error_message(
         ));
     }
 
-    msg
+    // This message becomes a tool result WITHOUT passing through the
+    // registry's finalize choke point, and it echoes back `raw_arguments`
+    // (model-authored) plus `err` (which can carry MCP server text). Strip
+    // harness-reserved code points here or a model that emits the sentinels
+    // in a malformed tool call gets them replayed inside the highest-trust
+    // channel it has.
+    xai_grok_tools::sentinel::strip_reserved(&msg).0
 }
