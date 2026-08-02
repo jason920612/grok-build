@@ -2,3 +2,9 @@
 **/*.rs.bk
 .DS_Store
 probes/results/
+
+# Windows test leakage: some tests derive a filename from a temp path and
+# write it into the crate dir instead of the temp dir (drive-colon becomes a
+# fullwidth colon in the name). Never commit those.
+*UsersjasonAppDataLocalTemp*
+*AppDataLocalTemp.tmp*
