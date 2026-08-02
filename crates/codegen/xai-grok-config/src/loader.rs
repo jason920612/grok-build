@@ -380,12 +380,12 @@ pub struct CampaignsState {
     pub dismissed_ids: Vec<String>,
 }
 
-/// Path to `$GROK_HOME/campaigns_state.json` under `home`.
+/// Path to `$GROKTOOL_HOME/campaigns_state.json` under `home`.
 pub fn campaigns_state_path(home: &std::path::Path) -> std::path::PathBuf {
     home.join(CAMPAIGNS_STATE_FILE)
 }
 
-/// Fail-open dismissed ids from `$GROK_HOME/campaigns_state.json`.
+/// Fail-open dismissed ids from `$GROKTOOL_HOME/campaigns_state.json`.
 pub fn load_dismissed_ids_from_home() -> std::collections::HashSet<String> {
     let Some(home) = crate::user_grok_home() else {
         return std::collections::HashSet::new();

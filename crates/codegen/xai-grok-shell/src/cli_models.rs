@@ -100,7 +100,7 @@ mod tests {
 
     /// Isolate process-global auth sources that `AuthStatus::resolve` consults.
     ///
-    /// Uses `GROK_AUTH_PATH` (not `GROK_HOME`) so a OnceLock-cached real home
+    /// Uses `GROK_AUTH_PATH` (not `GROKTOOL_HOME`) so a OnceLock-cached real home
     /// with `auth.json` cannot leak into these tests.
     fn isolate_auth_sources() -> (tempfile::TempDir, [EnvGuard; 7]) {
         let dir = tempfile::tempdir().unwrap();

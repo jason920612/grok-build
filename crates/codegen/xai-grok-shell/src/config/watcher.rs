@@ -439,7 +439,7 @@ fn discovery_change_for_path(path: &Path) -> Option<DiscoveryChange> {
 }
 
 /// True for a global/home-level config dir that must never be watched
-/// recursively: `grok_home` (`~/.grok`, or `$GROK_HOME`) or a known vendor dir
+/// recursively: `grok_home` (`~/.grok`, or `$GROKTOOL_HOME`) or a known vendor dir
 /// directly under `$HOME` ([`HOME_VENDOR_DIRS`]).
 ///
 /// These hold large non-skill trees — `~/.grok` alone has `worktrees/`,

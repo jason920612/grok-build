@@ -234,7 +234,7 @@ fn session_churn_returns_registry_snapshot_to_baseline() {
     let grok_home = TempDir::new().expect("grok home");
     let workdir = TempDir::new().expect("workdir");
     unsafe {
-        std::env::set_var("GROK_HOME", grok_home.path());
+        std::env::set_var("GROKTOOL_HOME", grok_home.path());
         std::env::set_var("GROK_CLI_CHAT_PROXY_BASE_URL", server.url());
         std::env::set_var("GROK_XAI_API_BASE_URL", server.url());
         std::env::set_var("XAI_API_KEY", "test-key-for-ci");

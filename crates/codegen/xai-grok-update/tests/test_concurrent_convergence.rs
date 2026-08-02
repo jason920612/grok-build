@@ -75,7 +75,7 @@ fn assert_active_binary(home: &Path, version: &str, platform: &str, expected_con
     assert!(ran_ok, "active grok must pass the smoke-test");
 }
 
-/// Lay down a managed-install layout in the test GROK_HOME:
+/// Lay down a managed-install layout in the test GROKTOOL_HOME:
 /// `bin/grok -> ../downloads/grok-<version>-<platform>` (what
 /// `install_internal_from_base` produces).
 fn fake_managed_install(version: &str) {

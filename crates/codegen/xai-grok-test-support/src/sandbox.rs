@@ -325,7 +325,7 @@ fn baseline_env_from_parent(
     for (key, value) in [
         ("HOME", home),
         ("USERPROFILE", home),
-        ("GROK_HOME", grok_home),
+        ("GROKTOOL_HOME", grok_home),
         ("TMPDIR", temp),
         ("TMP", temp),
         ("TEMP", temp),
@@ -468,7 +468,7 @@ fn diagnostic_value_is_sensitive(key: &OsStr) -> bool {
         || is_endpoint_key(&key)
         || matches!(
             key.to_ascii_uppercase().as_str(),
-            "HOME" | "USERPROFILE" | "GROK_HOME" | "TMPDIR" | "TMP" | "TEMP" | "GIT_CONFIG_GLOBAL"
+            "HOME" | "USERPROFILE" | "GROKTOOL_HOME" | "TMPDIR" | "TMP" | "TEMP" | "GIT_CONFIG_GLOBAL"
         )
 }
 
@@ -692,7 +692,7 @@ mod tests {
             .build();
         assert_eq!(env_value(&sandbox, "HOME"), Some(sandbox.home().into()));
         assert_eq!(
-            env_value(&sandbox, "GROK_HOME"),
+            env_value(&sandbox, "GROKTOOL_HOME"),
             Some(sandbox.grok_home().into())
         );
         assert_eq!(

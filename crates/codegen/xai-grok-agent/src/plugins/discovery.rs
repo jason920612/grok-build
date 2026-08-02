@@ -72,7 +72,7 @@ pub enum PluginOrigin {
     ProjectGrok,
     /// Project `.claude/plugins/`.
     ProjectClaude,
-    /// `$GROK_HOME/plugins/`.
+    /// `$GROKTOOL_HOME/plugins/`.
     UserGrok,
     /// `~/.claude/plugins/`.
     UserClaude,
@@ -208,7 +208,7 @@ impl DiscoveryConfig {
 
 // ── Discovery entry point ─────────────────────────────────────────────
 
-/// User plugin directories in priority order: `$GROK_HOME/plugins` then
+/// User plugin directories in priority order: `$GROKTOOL_HOME/plugins` then
 /// `~/.claude/plugins`.
 ///
 /// Unlike agent discovery, plugins are intentionally NOT discovered from a
@@ -337,7 +337,7 @@ pub fn discover_plugins(
         }
     }
 
-    // 4-5. User plugins: $GROK_HOME/plugins, legacy ~/.grok/plugins, ~/.claude/plugins.
+    // 4-5. User plugins: $GROKTOOL_HOME/plugins, legacy ~/.grok/plugins, ~/.claude/plugins.
     // Gate the grok plugins dir on user_grok_home() so a project's .grok/plugins
     // is never scanned as user-global when no home resolves.
     let grok = xai_grok_config::user_grok_home();

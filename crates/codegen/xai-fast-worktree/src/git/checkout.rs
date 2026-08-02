@@ -1191,7 +1191,7 @@ mod tests {
         xai_test_utils::require_git!();
         let temp = TempDir::new().unwrap();
 
-        // Isolate the worktree DB (lock + GROK_HOME → private tmp + restore).
+        // Isolate the worktree DB (lock + GROKTOOL_HOME → private tmp + restore).
         let fx = crate::db::GrokHomeFixture::new();
 
         let (repo_path, wt) = repo_with_worktree(&temp);
@@ -1201,13 +1201,13 @@ mod tests {
 
         // Rehydrate into a UNIQUE-basename dest so its DB id can't collide with
         // the `wt` id other concurrent rehydrate tests write to this (process-
-        // global GROK_HOME) DB and INSERT-OR-REPLACE our row.
+        // global GROKTOOL_HOME) DB and INSERT-OR-REPLACE our row.
         let dest = temp.path().join("subagent-db-rehydrate");
         let report =
             rehydrate_worktree_from_ref(&dest, &repo_path, &snap, Some("subagent-42")).unwrap();
 
         // Filter to OUR record by path: concurrent open_default writers may add
-        // other subagent rows since GROK_HOME is process-global. Match the
+        // other subagent rows since GROKTOOL_HOME is process-global. Match the
         // canonical path register_worktree stores (/var → /private/var on macOS).
         let dest_canon = dunce::canonicalize(&dest).unwrap_or_else(|_| dest.clone());
         let db = crate::db::WorktreeDb::open(&fx.home).unwrap();

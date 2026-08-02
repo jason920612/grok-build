@@ -1,9 +1,32 @@
-//! Filesystem locations for grok config files and binaries.
+//! Filesystem locations for this build's config files and binaries.
+//!
+//! This fork installs and runs as **`groktool`**, deliberately disjoint from
+//! the official `grok` CLI: different command name, different user home,
+//! different system config dir, and a different home env var. Nothing in
+//! this build reads or writes official-grok state, so both can be installed
+//! side by side without sharing auth, sessions, config, or plugins.
+//!
+//! [`PRODUCT_NAME`] and [`USER_DOT_DIR`] are the single source of truth for
+//! that identity — change them here, not at call sites. (Project-level
+//! `.grok/` directories inside a repository are a separate, read-only repo
+//! convention and are intentionally still honored; see `xai-grok-tools`'
+//! compat config.)
 
 use std::path::PathBuf;
 use std::sync::OnceLock;
 
-static GROK_HOME: OnceLock<PathBuf> = OnceLock::new();
+/// Command / binary name this build installs as.
+pub const PRODUCT_NAME: &str = "groktool";
+
+/// Per-user state directory name under the home directory.
+pub const USER_DOT_DIR: &str = ".groktool";
+
+/// Environment variable overriding the user home. Deliberately NOT the
+/// official CLI's `GROK_HOME`: inheriting that variable would re-couple the
+/// two installs through the environment.
+pub const HOME_ENV_VAR: &str = "GROKTOOL_HOME";
+
+static GROKTOOL_HOME: OnceLock<PathBuf> = OnceLock::new();
 
 #[cfg(target_os = "macos")]
 const CLAUDE_MANAGED_SETTINGS_PATH: &str =
@@ -11,15 +34,15 @@ const CLAUDE_MANAGED_SETTINGS_PATH: &str =
 #[cfg(target_os = "linux")]
 const CLAUDE_MANAGED_SETTINGS_PATH: &str = "/etc/claude-code/managed-settings.json";
 
-/// The default user grok directory (`~/.grok`, canonicalized) used when
-/// `GROK_HOME` is unset. Exposed so callers (e.g. display helpers) can detect
+/// The default user state directory (`~/.groktool`, canonicalized) used when
+/// `GROKTOOL_HOME` is unset. Exposed so callers (e.g. display helpers) can detect
 /// whether [`grok_home()`] is the default without duplicating the computation.
 ///
 /// Uses [`dunce::canonicalize`] instead of [`std::fs::canonicalize`]: on
 /// Windows, std returns a verbatim path (`\\?\C:\Users\...`) which external
 /// tools choke on — e.g. `git clone` rejects `\\?\` destinations with
 /// "Invalid argument", breaking marketplace cache clones under
-/// `~/.grok/marketplace-cache`. `dunce` strips the prefix whenever the path
+/// `~/.groktool/marketplace-cache`. `dunce` strips the prefix whenever the path
 /// is safely representable in legacy form; on non-Windows it is identical to
 /// `std::fs::canonicalize`.
 ///
@@ -28,14 +51,14 @@ const CLAUDE_MANAGED_SETTINGS_PATH: &str = "/etc/claude-code/managed-settings.js
 pub fn default_grok_home() -> PathBuf {
     #[allow(deprecated)]
     let home = std::env::home_dir().unwrap_or_else(|| PathBuf::from("."));
-    dunce::canonicalize(&home).unwrap_or(home).join(".grok")
+    dunce::canonicalize(&home).unwrap_or(home).join(USER_DOT_DIR)
 }
 
-/// Per-user config directory: `$GROK_HOME` or `~/.grok`. Created if needed.
+/// Per-user config directory: `$GROKTOOL_HOME` or `~/.groktool`. Created if needed.
 pub fn grok_home() -> PathBuf {
-    GROK_HOME
+    GROKTOOL_HOME
         .get_or_init(|| {
-            let grok_home = if let Ok(v) = std::env::var("GROK_HOME") {
+            let grok_home = if let Ok(v) = std::env::var(HOME_ENV_VAR) {
                 PathBuf::from(v)
             } else {
                 default_grok_home()
@@ -46,32 +69,39 @@ pub fn grok_home() -> PathBuf {
         .clone()
 }
 
-/// The user-global grok home, but only when one genuinely resolves: `Some` when
-/// `$GROK_HOME` is set or a home directory is found, `None` otherwise. Unlike
-/// [`grok_home()`], this never falls back to a cwd-relative `.grok`, so callers
-/// that *scan* user-global grok resources (hooks, marketplace sources, ...) don't
-/// mistake a project's `.grok` tree for the user-global one when no home resolves.
+/// The user-global home, but only when one genuinely resolves: `Some` when
+/// `$GROKTOOL_HOME` is set or a home directory is found, `None` otherwise. Unlike
+/// [`grok_home()`], this never falls back to a cwd-relative `.groktool`, so callers
+/// that *scan* user-global resources (hooks, marketplace sources, ...) don't
+/// mistake a project-local tree for the user-global one when no home resolves.
 pub fn user_grok_home() -> Option<PathBuf> {
     #[allow(deprecated)]
-    let resolvable = std::env::var_os("GROK_HOME").is_some() || std::env::home_dir().is_some();
+    let resolvable = std::env::var_os(HOME_ENV_VAR).is_some() || std::env::home_dir().is_some();
     resolvable.then(grok_home)
 }
 
-/// Canonical grok application path: `$GROK_HOME/bin/grok` (Unix) or `grok.exe` (Windows).
+/// Canonical application path: `$GROKTOOL_HOME/bin/groktool` (Unix) or
+/// `groktool.exe` (Windows).
 pub fn grok_application() -> PathBuf {
     grok_application_in(&grok_home())
 }
 
-/// [`grok_application`] under an explicit home instead of `$GROK_HOME`.
+/// [`grok_application`] under an explicit home instead of `$GROKTOOL_HOME`.
 pub fn grok_application_in(home: &std::path::Path) -> PathBuf {
-    let name = if cfg!(windows) { "grok.exe" } else { "grok" };
+    let name = if cfg!(windows) {
+        concat!("groktool", ".exe")
+    } else {
+        PRODUCT_NAME
+    };
     home.join("bin").join(name)
 }
 
-/// System-wide config directory: `/etc/grok/` on Unix, `None` on Windows.
+/// System-wide config directory: `/etc/groktool/` on Unix, `None` on Windows.
+/// Distinct from the official CLI's `/etc/grok` so a machine-wide policy for
+/// one product never silently governs the other.
 pub fn system_config_dir() -> Option<PathBuf> {
     if cfg!(unix) {
-        Some(PathBuf::from("/etc/grok"))
+        Some(PathBuf::from("/etc").join(PRODUCT_NAME))
     } else {
         None
     }

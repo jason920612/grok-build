@@ -6,15 +6,15 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 pub use xai_grok_config::grok_home;
 
-/// Path to `$GROK_HOME/pager.toml`.
+/// Path to `$GROKTOOL_HOME/pager.toml`.
 pub fn pager_toml_path() -> PathBuf {
     grok_home().join("pager.toml")
 }
 
-/// User-facing label for the user grok directory (``~/.grok`` or ``$GROK_HOME``).
+/// User-facing label for the user grok directory (``~/.grok`` or ``$GROKTOOL_HOME``).
 ///
 /// Derived from resolved [`grok_home()`] vs `xai_grok_config::default_grok_home()`,
-/// not from whether `GROK_HOME` is set in the environment.
+/// not from whether `GROKTOOL_HOME` is set in the environment.
 pub fn display_grok_home_prefix() -> String {
     display_grok_home_prefix_for(&grok_home())
 }
@@ -23,7 +23,7 @@ fn display_grok_home_prefix_for(home: &Path) -> String {
     if home == xai_grok_config::default_grok_home() {
         "~/.grok".to_string()
     } else {
-        "$GROK_HOME".to_string()
+        "$GROKTOOL_HOME".to_string()
     }
 }
 
@@ -426,7 +426,7 @@ mod tests {
 
     #[test]
     fn display_grok_home_prefix_default_install() {
-        if std::env::var("GROK_HOME").is_ok() {
+        if std::env::var("GROKTOOL_HOME").is_ok() {
             return;
         }
         assert_eq!(display_grok_home_prefix(), "~/.grok");
@@ -436,7 +436,7 @@ mod tests {
     fn display_user_grok_path_joins_relative() {
         let path = display_user_grok_path("config.toml");
         assert!(path.ends_with("/config.toml") || path.ends_with("\\config.toml"));
-        assert!(path.contains(".grok") || path.contains("$GROK_HOME"));
+        assert!(path.contains(".grok") || path.contains("$GROKTOOL_HOME"));
     }
 
     #[test]
@@ -444,11 +444,11 @@ mod tests {
         let custom = std::env::temp_dir().join("grok-home-display-regression");
         assert_eq!(
             display_user_grok_path_for(&custom, "config.toml"),
-            "$GROK_HOME/config.toml"
+            "$GROKTOOL_HOME/config.toml"
         );
         assert_eq!(
             display_user_grok_path_for(&custom, "sandbox.toml"),
-            "$GROK_HOME/sandbox.toml"
+            "$GROKTOOL_HOME/sandbox.toml"
         );
     }
 

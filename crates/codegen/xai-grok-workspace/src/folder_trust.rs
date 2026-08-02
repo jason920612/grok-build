@@ -915,7 +915,7 @@ mod tests {
         );
     }
 
-    // GROK_HOME-isolation idiom mirrored from this crate's `permission::claude_compat`
+    // GROKTOOL_HOME-isolation idiom mirrored from this crate's `permission::claude_compat`
     // tests (the workspace crate has no `serial_test`/`xai-grok-test-support`
     // dev-dep): nextest runs each test in its own process; `ENV_LOCK` serializes
     // the rare in-process `cargo test` thread, and `EnvVarGuard` restores the prior
@@ -942,7 +942,7 @@ mod tests {
         // remote flag is unambiguously the only enable being dropped here.)
         let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let home = tempfile::tempdir().unwrap();
-        let _home = EnvVarGuard::set("GROK_HOME", home.path());
+        let _home = EnvVarGuard::set("GROKTOOL_HOME", home.path());
         let _flag = EnvVarGuard::unset("GROK_FOLDER_TRUST");
 
         let remote = RemoteSettings {
@@ -962,12 +962,12 @@ mod tests {
     fn release_build_keeps_gate_when_enabled() {
         // A release-stamped build (is_local_build=false) honors the remote enable,
         // keeping today's gate. Isolate config so neither on-disk user/managed
-        // config nor an ambient env flag can override it: empty GROK_HOME (no
+        // config nor an ambient env flag can override it: empty GROKTOOL_HOME (no
         // config.toml/managed_config.toml) + GROK_FOLDER_TRUST unset. nextest's
         // process-per-test makes grok_home()'s OnceLock pick up the temp dir.
         let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let home = tempfile::tempdir().unwrap();
-        let _home = EnvVarGuard::set("GROK_HOME", home.path());
+        let _home = EnvVarGuard::set("GROKTOOL_HOME", home.path());
         let _flag = EnvVarGuard::unset("GROK_FOLDER_TRUST");
 
         let remote = RemoteSettings {
@@ -987,10 +987,10 @@ mod tests {
     fn local_build_ignores_explicit_env_optin() {
         // Auto-trust is absolute on a local build: even an explicit
         // GROK_FOLDER_TRUST=1 does NOT enable the feature (so a self-built grok
-        // never prompts). GROK_HOME isolated so on-disk config can't influence it.
+        // never prompts). GROKTOOL_HOME isolated so on-disk config can't influence it.
         let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let home = tempfile::tempdir().unwrap();
-        let _home = EnvVarGuard::set("GROK_HOME", home.path());
+        let _home = EnvVarGuard::set("GROKTOOL_HOME", home.path());
         let _flag = EnvVarGuard::set("GROK_FOLDER_TRUST", Path::new("1"));
 
         assert!(!feature_enabled_for_build(None, true));
@@ -999,11 +999,11 @@ mod tests {
     #[test]
     fn release_build_defaults_on() {
         // A release-stamped build with no env/config/managed/remote signal defaults
-        // the feature ON. Empty GROK_HOME (no config.toml/managed config) +
+        // the feature ON. Empty GROKTOOL_HOME (no config.toml/managed config) +
         // GROK_FOLDER_TRUST unset so only the default applies.
         let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let home = tempfile::tempdir().unwrap();
-        let _home = EnvVarGuard::set("GROK_HOME", home.path());
+        let _home = EnvVarGuard::set("GROKTOOL_HOME", home.path());
         let _flag = EnvVarGuard::unset("GROK_FOLDER_TRUST");
 
         assert!(feature_enabled_for_build(None, false));
@@ -1031,11 +1031,11 @@ mod tests {
         // On a local/dev build the whole feature is inert. Both halves pin a guard
         // via a UNIQUE per-repo key (never store-file existence) so they hold under
         // single-process `cargo test` too. Assert ONLY when compiled unstamped
-        // (mirrors `is_local_build_honors_test_version_override`); GROK_HOME-isolated
+        // (mirrors `is_local_build_honors_test_version_override`); GROKTOOL_HOME-isolated
         // and ENV_LOCK-serialized so toggling GROK_TEST_VERSION is race-safe.
         let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let home = tempfile::tempdir().unwrap();
-        let _home = EnvVarGuard::set("GROK_HOME", home.path());
+        let _home = EnvVarGuard::set("GROKTOOL_HOME", home.path());
         let _unset = EnvVarGuard::unset(xai_grok_version::TEST_VERSION_ENV);
         if option_env!("GROK_VERSION").is_some() {
             return; // a release-stamped test binary is not a local build
@@ -1079,10 +1079,10 @@ mod tests {
         // The store half of revoke, tested directly (not just via the shell
         // wrapper): a previously-trusted folder reports was_trusted=true AND gets
         // an explicit `set_untrusted` persisted, so it is untrusted on reload.
-        // GROK_HOME-isolated so the seed/deny hit a temp store, not the real file.
+        // GROKTOOL_HOME-isolated so the seed/deny hit a temp store, not the real file.
         let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let home = tempfile::tempdir().unwrap();
-        let _env = EnvVarGuard::set("GROK_HOME", home.path());
+        let _env = EnvVarGuard::set("GROKTOOL_HOME", home.path());
         let _sim = simulate_release_build();
         let tmp = repo_tmp();
         let key = workspace_key(tmp.path());
@@ -1108,10 +1108,10 @@ mod tests {
         // cascades to the child (a spurious child `set_untrusted` would win
         // most-specific and break the cascade). This store half does NOT touch the
         // `DECISIONS` cache — that downgrade is the shell wrapper's job.
-        // GROK_HOME-isolated so the grant writes to a temp store.
+        // GROKTOOL_HOME-isolated so the grant writes to a temp store.
         let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let home = tempfile::tempdir().unwrap();
-        let _env = EnvVarGuard::set("GROK_HOME", home.path());
+        let _env = EnvVarGuard::set("GROKTOOL_HOME", home.path());
         let _sim = simulate_release_build();
         // Distinct git roots so `workspace_key` keeps parent/child as separate
         // keys (the child's own `.git` stops discovery at the child).

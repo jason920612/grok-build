@@ -1,7 +1,7 @@
 //! End-to-end tests for the `--debug` firehose file logging.
 //!
 //! Runs the built grok binary against the mock inference server with a
-//! caller-owned `$GROK_HOME`, then inspects `~/.grok/debug/`:
+//! caller-owned `$GROKTOOL_HOME`, then inspects `~/.grok/debug/`:
 //! - the `--debug` FLAG drives the firehose end to end through the master switch:
 //!   a live `agent` session launched with `--debug` writes a non-empty per-session
 //!   `~/.grok/debug/<sessionId>.txt` with first-party content, and does NOT enable
@@ -46,7 +46,7 @@ where
     tokio::task::LocalSet::new().run_until(f()).await;
 }
 
-/// The per-session firehose directory under a pinned `$GROK_HOME`.
+/// The per-session firehose directory under a pinned `$GROKTOOL_HOME`.
 fn debug_dir(home: &Path) -> PathBuf {
     home.join(".grok").join("debug")
 }
@@ -68,7 +68,7 @@ fn firehose_txt_files(home: &Path) -> Vec<PathBuf> {
         .collect()
 }
 
-/// Build a headless `grok -p` command with a pinned `$GROK_HOME` so the firehose
+/// Build a headless `grok -p` command with a pinned `$GROKTOOL_HOME` so the firehose
 /// lands under `<home>/.grok/debug`. Firehose env knobs are cleared so the test
 /// is hermetic regardless of the developer's shell.
 fn debug_cmd(
@@ -81,7 +81,7 @@ fn debug_cmd(
     sandbox
         .set_env("HOME", home)
         .set_env("USERPROFILE", home)
-        .set_env("GROK_HOME", home.join(".grok"));
+        .set_env("GROKTOOL_HOME", home.join(".grok"));
     let mut cmd = tokio::process::Command::new(grok_binary());
     cmd.args(["-p", "say hi", "--yolo", "--output-format", "json"])
         .args(extra)

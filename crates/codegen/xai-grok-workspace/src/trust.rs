@@ -20,7 +20,7 @@
 //!
 //! The store is rooted at [`xai_grok_config::user_grok_home`] — the **Option**
 //! home that resolves to `None` (rather than a cwd-relative `./.grok`) when
-//! neither `$GROK_HOME` nor a home directory is set (e.g. a minimal container /
+//! neither `$GROKTOOL_HOME` nor a home directory is set (e.g. a minimal container /
 //! CI). In that no-home environment [`TrustStore::load`] yields an **empty,
 //! trust-nothing** store that persists nothing, so a cloned repo can never ship
 //! a `./.grok/trusted_folders.toml` that self-trusts its own checkout (fail
@@ -1423,11 +1423,11 @@ mod tests {
     // how the caller binds the fixture's return.
     use crate::LockedTestEnv;
 
-    /// Point `GROK_HOME` at an isolated tempdir and register one grok-managed
+    /// Point `GROKTOOL_HOME` at an isolated tempdir and register one grok-managed
     /// worktree at `<home>/worktrees/repo/<name>` recording `source_repo` and
     /// `creation_mode`. The worktree dir is a PLAIN directory — NOT a git linked
     /// worktree — so only the registry can collapse it. Returns `(env, worktree
-    /// dir)`; the [`LockedTestEnv`] holds the lock and restores `GROK_HOME` on
+    /// dir)`; the [`LockedTestEnv`] holds the lock and restores `GROKTOOL_HOME` on
     /// drop (before releasing the lock), so the caller may bind it any way.
     fn register_grok_worktree(
         temp: &tempfile::TempDir,
@@ -1446,7 +1446,7 @@ mod tests {
 
         // Acquire the lock, then set the env under it (LockedTestEnv restores the
         // env before releasing the lock on drop).
-        let env = LockedTestEnv::lock().set("GROK_HOME", &home);
+        let env = LockedTestEnv::lock().set("GROKTOOL_HOME", &home);
 
         let db = WorktreeDb::open(&home).unwrap();
         let record = WorktreeRecord {

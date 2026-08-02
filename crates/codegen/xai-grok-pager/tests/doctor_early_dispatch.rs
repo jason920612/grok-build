@@ -21,7 +21,7 @@ fn doctor_json_bypasses_unrelated_startup_state() {
     let home = temp.path().join("home");
     let grok_home = temp.path().join("grok-home");
     std::fs::create_dir_all(&home).expect("create HOME");
-    std::fs::create_dir_all(&grok_home).expect("create GROK_HOME");
+    std::fs::create_dir_all(&grok_home).expect("create GROKTOOL_HOME");
 
     let version_path = grok_home.join("version.json");
     std::fs::write(
@@ -310,7 +310,7 @@ fn base_pager_command(
     command
         .env_clear()
         .env("HOME", home)
-        .env("GROK_HOME", grok_home)
+        .env("GROKTOOL_HOME", grok_home)
         .env("SHELL", shell)
         .env("PATH", std::env::var_os("PATH").unwrap_or_default())
         .env("TERM", "xterm-256color")

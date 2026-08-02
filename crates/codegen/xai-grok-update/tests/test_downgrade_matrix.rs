@@ -451,7 +451,7 @@ async fn auto_update_target_npm_rollback_returns_none() {
 // the relaunch signal.
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Lay down a managed-install layout in the test GROK_HOME:
+/// Lay down a managed-install layout in the test GROKTOOL_HOME:
 /// `bin/grok -> ../downloads/grok-<version>-<platform>` (what
 /// `install_internal_from_base` produces).
 fn fake_managed_install(version: &str) {

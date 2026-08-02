@@ -59,7 +59,7 @@ fn is_hook_disabled_with_file(hook_name: &str, file: &Path) -> bool {
 /// Disable a hook by name. Adds to .
 pub fn disable_hook(hook_name: &str) -> Result<(), String> {
     let file = disabled_hooks_file_path()
-        .ok_or_else(|| "no user grok home (set $GROK_HOME or $HOME)".to_string())?;
+        .ok_or_else(|| "no user grok home (set $GROKTOOL_HOME or $HOME)".to_string())?;
     disable_hook_with_file(hook_name, &file)
 }
 
@@ -122,7 +122,7 @@ fn enable_hook_with_file(hook_name: &str, file: &Path) -> Result<bool, String> {
     Ok(true)
 }
 
-/// Returns the path to `$GROK_HOME/disabled-hooks`, or `None` when no user grok
+/// Returns the path to `$GROKTOOL_HOME/disabled-hooks`, or `None` when no user grok
 /// home resolves.
 fn disabled_hooks_file_path() -> Option<PathBuf> {
     Some(xai_grok_config::user_grok_home()?.join("disabled-hooks"))

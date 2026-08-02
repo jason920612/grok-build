@@ -41,7 +41,7 @@ pub(crate) fn find_mcp_json_files_in(chain_dirs: &[PathBuf]) -> Vec<PathBuf> {
         .collect()
 }
 
-/// True when `config_path` is `$GROK_HOME/config.toml` (user tier, not project).
+/// True when `config_path` is `$GROKTOOL_HOME/config.toml` (user tier, not project).
 fn is_user_grok_config_file(config_path: &Path) -> bool {
     let Some(user_home) = xai_grok_config::user_grok_home() else {
         return false;

@@ -21,7 +21,7 @@
 //!
 //! ## Files
 //!
-//! `$GROK_HOME/memtrace/<start-ts>-<pid>.jsonl` (+ `.1` after 4 MiB
+//! `$GROKTOOL_HOME/memtrace/<start-ts>-<pid>.jsonl` (+ `.1` after 4 MiB
 //! rotation) and `<stem>-jemalloc-<seq>.txt` threshold dumps. Files are
 //! created lazily on the first event so short-lived CLI invocations leave no
 //! debris. Traces contain **process memory numbers only** — no user content —
@@ -537,7 +537,7 @@ fn first_threshold_from_env() -> u64 {
 }
 
 /// Start memory tracing: install the process-global sink under
-/// `dir` (e.g. `$GROK_HOME/memtrace/`) and spawn the detached sampler
+/// `dir` (e.g. `$GROKTOOL_HOME/memtrace/`) and spawn the detached sampler
 /// thread. Call once from the composition-root binary, AFTER the
 /// short-lived-child intercepts (mermaid render worker) so helper processes
 /// don't trace. Inert when `GROK_MEMTRACE=0`.

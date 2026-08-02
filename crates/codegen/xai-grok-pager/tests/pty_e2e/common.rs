@@ -268,7 +268,7 @@ pub(crate) fn seed_mcp_server_config(content: &ContentController) {
     let command = "cmd.exe";
 
     let grok_home = content.home().join(".grok");
-    std::fs::create_dir_all(&grok_home).expect("create fake GROK_HOME");
+    std::fs::create_dir_all(&grok_home).expect("create fake GROKTOOL_HOME");
     let config = format!(
         "[mcp_servers.{MCP_TEST_SERVER}]\ncommand = \"{command}\"\nargs = []\nstartup_timeout_sec = 2\n"
     );
@@ -390,7 +390,7 @@ pub(crate) const SEND_NOW_TIP_SENTINEL: &str = "to send now";
 // The core fix (deduplication in load_hooks_from_sources) is verified by
 // unit tests in xai-grok-hooks::discovery::tests. The PTY E2E test requires
 // careful environment variable setup to avoid static caching issues with
-// GROK_HOME.
+// GROKTOOL_HOME.
 
 // ── Mouse reporting toggle (opt-in scrollback Ctrl+R) ───────────────────
 
@@ -403,7 +403,7 @@ pub(crate) const MOUSE_OFF_HINT_PROMPT: &str =
     "/toggle-mouse-reporting to enable mouse reporting and restore TUI features";
 
 /// Seed `~/.grok/config.toml` with a `[ui]` section body (e.g.
-/// `"vim_mode = true"`). Same `{GROK_HOME|HOME}/.grok/config.toml` location
+/// `"vim_mode = true"`). Same `{GROKTOOL_HOME|HOME}/.grok/config.toml` location
 /// `seed_mouse_reporting_toggle_config` uses; call before spawning the pager.
 pub(crate) fn seed_ui_config(content: &ContentController, ui_body: &str) {
     let grok_home = content.home().join(".grok");
@@ -415,7 +415,7 @@ pub(crate) fn seed_ui_config(content: &ContentController, ui_body: &str) {
 pub(crate) fn seed_mouse_reporting_toggle_config(content: &ContentController, enabled: bool) {
     let grok_home = content.home().join(".grok");
     std::fs::create_dir_all(&grok_home).expect("create .grok");
-    // Minimal opt-in only — matches load_config's `{GROK_HOME|HOME}/.grok/config.toml`.
+    // Minimal opt-in only — matches load_config's `{GROKTOOL_HOME|HOME}/.grok/config.toml`.
     let config = if enabled {
         "[ui]\nmouse_reporting_toggle = true\n"
     } else {
@@ -1038,7 +1038,7 @@ pub(crate) const WRAP_TIMEOUT: Duration = Duration::from_secs(120);
 const WRAP_DRAIN_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Run `grok wrap <wrap_args...>` to completion inside a PTY with an isolated
-/// `GROK_HOME`, returning the exit code (`None` only while still running at
+/// `GROKTOOL_HOME`, returning the exit code (`None` only while still running at
 /// [`WRAP_TIMEOUT`]) and everything the wrap PTY emitted. `extra_env` is where
 /// tests pin `SHELL`; wrap needs no mock content — it dispatches in `main`
 /// before auth/network/sandbox.
@@ -1062,7 +1062,7 @@ pub(crate) fn run_wrap_driving(
 
     let mut args = vec!["wrap"];
     args.extend_from_slice(wrap_args);
-    let mut env: Vec<(&str, &str)> = vec![("GROK_HOME", &home_str), ("NO_COLOR", "1")];
+    let mut env: Vec<(&str, &str)> = vec![("GROKTOOL_HOME", &home_str), ("NO_COLOR", "1")];
     env.extend_from_slice(extra_env);
 
     let mut harness =

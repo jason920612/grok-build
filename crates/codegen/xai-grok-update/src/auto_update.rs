@@ -487,13 +487,22 @@ pub async fn run_update_if_available(
         return Ok(false);
     }
 
-    // Resolve effective auto_update: None defaults to true (first-run).
-    let auto_update = current_config.cli.auto_update.unwrap_or(true);
+    // Resolve effective auto_update: None defaults to FALSE in this fork.
+    //
+    // Upstream defaults this on, which is right for the official CLI but
+    // actively wrong here: the update channel serves official `grok`
+    // artifacts, so a silent auto-update would overwrite this build —
+    // sentinel-sealed rule delivery and all — with the upstream binary. That
+    // is the exact opposite of running as a separate product. Users who
+    // genuinely want the official binary can set `auto_update = true`, or
+    // just install the official CLI alongside; the two no longer share a
+    // home directory, a config file, or a command name.
+    let auto_update = current_config.cli.auto_update.unwrap_or(false);
 
     if current_config.cli.auto_update.is_none()
         && let Err(e) = config::update_config(|st| {
             if st.cli.auto_update.is_none() {
-                st.cli.auto_update = Some(true);
+                st.cli.auto_update = Some(false);
             }
         })
         .await
@@ -1148,7 +1157,7 @@ async fn smoke_test_binary(binary_path: &std::path::Path) -> bool {
 /// Test-only entry point: same as [`install_internal`] but reads from
 /// `gcs_base_url` instead of the hardcoded GCS bucket. Persists installer
 /// config and writes to `~/.grok/bin/`, so callers must isolate
-/// `GROK_HOME`.
+/// `GROKTOOL_HOME`.
 #[doc(hidden)]
 pub async fn install_internal_from_base(
     target: Option<&str>,
@@ -1260,7 +1269,7 @@ async fn activate_verified_download(download: &VerifiedDownload) -> Result<()> {
 /// Failures are silently ignored — completions are a nice-to-have, not a
 /// requirement for a successful update.
 async fn regenerate_completions(binary: &std::path::Path, grok_home: &std::path::Path) {
-    // Derive $HOME independently — grok_home may be overridden via GROK_HOME
+    // Derive $HOME independently — grok_home may be overridden via GROKTOOL_HOME
     // env var, so grok_home.parent() isn't necessarily the user's home dir.
     #[allow(deprecated)]
     let user_home = std::env::home_dir().unwrap_or_default();

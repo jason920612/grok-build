@@ -2122,7 +2122,7 @@ extra_rule_dirs = ["/c/rules"]
         // *logic* by manually populating `global_items` first and then
         // asserting that calling the project-side branch with the same path
         // would skip. Direct end-to-end coverage of the home-collision case
-        // requires `GROK_HOME` plumbing which is intentionally out of scope.
+        // requires `GROKTOOL_HOME` plumbing which is intentionally out of scope.
         let global = dunce::canonicalize(home.join(".claude").join("skills")).unwrap();
         let project = dunce::canonicalize(home.join(".claude").join("skills")).unwrap();
         assert_eq!(global, project, "sanity: paths canonicalize to the same");

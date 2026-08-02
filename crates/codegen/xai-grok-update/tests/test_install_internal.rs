@@ -1,13 +1,13 @@
 //! End-to-end tests for `install_internal` — the GCS-bucket installer used
 //! when `installer = "internal"` is configured.
 //!
-//! Wires together a wiremock-mocked GCS bucket + an isolated `GROK_HOME`
+//! Wires together a wiremock-mocked GCS bucket + an isolated `GROKTOOL_HOME`
 //! tempdir so we can verify the full install pipeline:
 //!   fetch version → download grok binary → chmod → atomic symlink →
 //!   cleanup_old_downloads → persist installer config.
 //!
 //! The function reads `grok_home()` (a process-wide `OnceLock`), so all
-//! tests in this binary share a single `GROK_HOME` and run serially via
+//! tests in this binary share a single `GROKTOOL_HOME` and run serially via
 //! `#[serial]`.
 
 #![cfg(unix)]

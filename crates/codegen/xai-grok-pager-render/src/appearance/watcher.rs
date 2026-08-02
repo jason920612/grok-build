@@ -38,7 +38,7 @@ impl ConfigWatcher {
     pub async fn changed(&mut self) -> Result<(), watch::error::RecvError> {
         self.rx.changed().await
     }
-    /// Path to `$GROK_HOME/pager.toml`.
+    /// Path to `$GROKTOOL_HOME/pager.toml`.
     fn pager_config_path() -> PathBuf {
         crate::util::pager_toml_path()
     }

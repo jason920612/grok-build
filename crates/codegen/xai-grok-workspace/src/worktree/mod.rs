@@ -2456,7 +2456,7 @@ pub fn worktree_auto_gc_layer_from_settings(
     }
 }
 
-/// Env + `$GROK_HOME/config.toml` only — **`remote=None` is intentional**.
+/// Env + `$GROKTOOL_HOME/config.toml` only — **`remote=None` is intentional**.
 ///
 /// Workspace handle startup has no remote-settings blob (unlike shell agent
 /// init, which resolves env > TOML > remote). Remote `worktree_auto_gc`
@@ -2813,12 +2813,12 @@ mod tests {
     // regardless of how the caller binds the fixture's return.
     use crate::LockedTestEnv;
 
-    /// Point `GROK_HOME` at an isolated tempdir (`resolve_grok_home` re-reads
+    /// Point `GROKTOOL_HOME` at an isolated tempdir (`resolve_grok_home` re-reads
     /// the env per call by design) and register one worktree record at
     /// `<home>/worktrees/repo/wt` with no `last_accessed_at`.
     ///
     /// Returns `(env, home, worktree dir)`; the [`LockedTestEnv`] holds the lock
-    /// and restores `GROK_HOME` on drop (before releasing the lock), so the
+    /// and restores `GROKTOOL_HOME` on drop (before releasing the lock), so the
     /// caller may bind it any way.
     fn worktree_db_fixture(
         temp: &tempfile::TempDir,
@@ -2831,7 +2831,7 @@ mod tests {
         std::fs::create_dir_all(&wt).unwrap();
         // Acquire the lock, then set the env under it (LockedTestEnv restores the
         // env before releasing the lock on drop).
-        let env = LockedTestEnv::lock().set("GROK_HOME", &home);
+        let env = LockedTestEnv::lock().set("GROKTOOL_HOME", &home);
 
         let db = WorktreeDb::open(&home).unwrap();
         let record = WorktreeRecord {

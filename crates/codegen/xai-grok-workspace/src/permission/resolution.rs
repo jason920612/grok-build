@@ -224,7 +224,7 @@ fn load_config_toml_permissions(cwd: &Path, project_trusted: bool) -> Vec<Source
 
     // Global `~/.grok/config.toml` first (lowest priority within this layer).
     // Gated on user_grok_home() so a project's .grok/config.toml is never read as
-    // global permissions when neither GROK_HOME nor a home dir resolves.
+    // global permissions when neither GROKTOOL_HOME nor a home dir resolves.
     if let Some(global_path) = xai_grok_config::user_grok_home().map(|g| g.join("config.toml"))
         && global_path.is_file()
     {
@@ -1397,7 +1397,7 @@ mod tests {
 
     // Crate-shared lock serializing tests that mutate the global process
     // environment so concurrent test threads can't race on shared env state.
-    // Shared so `GROK_HOME`/`HOME` mutations here also serialize against the
+    // Shared so `GROKTOOL_HOME`/`HOME` mutations here also serialize against the
     // other env-mutating test modules under single-process `cargo test --lib`.
     use crate::ENV_TEST_LOCK as ENV_LOCK;
 
@@ -1937,13 +1937,13 @@ mod tests {
 
     #[test]
     fn load_claude_env_merges_with_precedence() {
-        // GROK_HOME-isolate so the claude-import marker reads clean (an imported
+        // GROKTOOL_HOME-isolate so the claude-import marker reads clean (an imported
         // dev machine would otherwise early-return an empty map and fail these
         // asserts); the project tier overrides any real `~/.claude`, so the
         // per-key assertions hold without isolating HOME.
         let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let home = tempfile::tempdir().unwrap();
-        let _home_guard = EnvVarGuard::set("GROK_HOME", home.path());
+        let _home_guard = EnvVarGuard::set("GROKTOOL_HOME", home.path());
         let _marker_guard = EnvVarGuard::unset("_GROK_CLAUDE_MARKER_OVERRIDE");
         let tmp = tempfile::tempdir().unwrap();
         let claude_dir = tmp.path().join(".claude");
@@ -1971,12 +1971,12 @@ mod tests {
 
     #[test]
     fn load_claude_env_empty_when_no_settings() {
-        // Isolate GROK_HOME (claude-import marker) AND HOME (global `~/.claude`)
+        // Isolate GROKTOOL_HOME (claude-import marker) AND HOME (global `~/.claude`)
         // so neither a dev machine's import marker nor its real `~/.claude` env
         // can trip the empty-map assertion.
         let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let home = tempfile::tempdir().unwrap();
-        let _home_guard = EnvVarGuard::set("GROK_HOME", home.path());
+        let _home_guard = EnvVarGuard::set("GROKTOOL_HOME", home.path());
         let _real_home_guard = EnvVarGuard::set("HOME", home.path());
         let _marker_guard = EnvVarGuard::unset("_GROK_CLAUDE_MARKER_OVERRIDE");
         let tmp = tempfile::tempdir().unwrap();
@@ -1988,12 +1988,12 @@ mod tests {
     fn load_claude_env_with_project_drops_repo_env_when_untrusted() {
         // The repo-tree `.claude/settings.json` env is injected into every spawned
         // subprocess (BASH_ENV / GIT_SSH_COMMAND / …), so an untrusted folder must
-        // drop it. Isolate GROK_HOME so the claude-import marker reads clean (an
+        // drop it. Isolate GROKTOOL_HOME so the claude-import marker reads clean (an
         // imported dev machine would otherwise early-return an empty map); the
         // unique key keeps it independent of the host's real `~/.claude`.
         let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let home = tempfile::tempdir().unwrap();
-        let _home_guard = EnvVarGuard::set("GROK_HOME", home.path());
+        let _home_guard = EnvVarGuard::set("GROKTOOL_HOME", home.path());
         let _marker_guard = EnvVarGuard::unset("_GROK_CLAUDE_MARKER_OVERRIDE");
         let tmp = tempfile::tempdir().unwrap();
         let claude_dir = tmp.path().join(".claude");
@@ -2897,7 +2897,7 @@ mod tests {
         let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let home = tempfile::tempdir().unwrap();
         let _home_guard = EnvVarGuard::set("HOME", home.path());
-        let _grok_guard = EnvVarGuard::set("GROK_HOME", home.path());
+        let _grok_guard = EnvVarGuard::set("GROKTOOL_HOME", home.path());
         let _marker_guard = EnvVarGuard::unset("_GROK_CLAUDE_MARKER_OVERRIDE");
 
         // Global user-tier allow (must survive untrusted project).
@@ -2956,17 +2956,17 @@ mod tests {
     /// `await_holding_lock`). Does not assert exact global rule counts:
     /// `xai_grok_config::grok_home()` is a process-wide `OnceLock`, so under
     /// single-process `cargo test` an earlier test may have already pinned
-    /// `GROK_HOME`. Project-rule filtering is independent of that; global
+    /// `GROKTOOL_HOME`. Project-rule filtering is independent of that; global
     /// survival is checked only when our temp home is the live `user_grok_home()`.
     #[test]
     fn untrusted_project_config_toml_permissions_are_not_honored() {
         let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let home = tempfile::tempdir().unwrap();
         let _home_guard = EnvVarGuard::set("HOME", home.path());
-        let _grok_guard = EnvVarGuard::set("GROK_HOME", home.path());
+        let _grok_guard = EnvVarGuard::set("GROKTOOL_HOME", home.path());
         let _marker_guard = EnvVarGuard::unset("_GROK_CLAUDE_MARKER_OVERRIDE");
 
-        // Global allow (survives untrusted project when GROK_HOME resolves here).
+        // Global allow (survives untrusted project when GROKTOOL_HOME resolves here).
         std::fs::write(
             home.path().join("config.toml"),
             r#"[permission]
@@ -2992,7 +2992,7 @@ allow = ["Bash(evil *)"]
             .enable_all()
             .build()
             .expect("test runtime");
-        // Untrusted may be None when no global rules load (GROK_HOME OnceLock
+        // Untrusted may be None when no global rules load (GROKTOOL_HOME OnceLock
         // already pinned by another test) — empty after dropping project is OK.
         let untrusted = rt.block_on(resolve_permissions_with_provenance_inner(
             tmp.path(),
@@ -3027,7 +3027,7 @@ allow = ["Bash(evil *)"]
         let global_live = xai_grok_config::user_grok_home()
             .is_some_and(|g| g == home.path() || g.starts_with(home.path()));
         if global_live {
-            let untrusted = untrusted.expect("global rules present when GROK_HOME is live");
+            let untrusted = untrusted.expect("global rules present when GROKTOOL_HOME is live");
             assert!(
                 untrusted
                     .config

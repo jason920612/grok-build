@@ -1,7 +1,7 @@
 //! End-to-end test for the global `[models]` defaults.
 //!
 //! Runs the built grok binary against the mock inference server with a
-//! caller-owned `$GROK_HOME` whose `config.toml` sets every global `[models]`
+//! caller-owned `$GROKTOOL_HOME` whose `config.toml` sets every global `[models]`
 //! default. Asserts the turn succeeds with all of them set and that the
 //! wire-observable one — `extra_headers` — reaches the `/v1/chat/completions`
 //! request header, for a model with no per-model `[model.<id>]` override.

@@ -2579,7 +2579,7 @@ mod tests {
     fn remove_with_delegate_deregisters_plain_worktree_without_calling_delegate() {
         xai_test_utils::require_git!();
         use xai_test_utils::git::{git_commit_all, init_git_repo};
-        // Isolate GROK_HOME so the post-removal unregister writes to a private DB.
+        // Isolate GROKTOOL_HOME so the post-removal unregister writes to a private DB.
         #[cfg(feature = "metadata")]
         let _fx = crate::db::GrokHomeFixture::new();
 
@@ -3230,12 +3230,12 @@ mod tests {
 
         #[test]
         fn register_worktree_writes_correct_fields() {
-            // Isolate GROK_HOME so register_worktree's open_default write lands
+            // Isolate GROKTOOL_HOME so register_worktree's open_default write lands
             // in our own DB (lock + private tmp + restore via the fixture).
             let fx = crate::db::GrokHomeFixture::new();
 
             // Unique basename → unique id, so a concurrent open_default writer
-            // (GROK_HOME is process-global) can't INSERT-OR-REPLACE our row.
+            // (GROKTOOL_HOME is process-global) can't INSERT-OR-REPLACE our row.
             let wt_path = fx.home.join("register-fields-wt");
             std::fs::create_dir(&wt_path).unwrap();
             // register_worktree stores the canonical path (/var → /private/var on macOS).
@@ -3939,7 +3939,7 @@ mod tests {
             // succeeds, so the mock's delete_snapshot is not called.)
             use std::sync::atomic::{AtomicUsize, Ordering};
 
-            // GROK_HOME == the gc DB dir so remove_worktree's open_default
+            // GROKTOOL_HOME == the gc DB dir so remove_worktree's open_default
             // unregister hits the same DB the gc record lives in.
             let fx = crate::db::GrokHomeFixture::new();
             let db = WorktreeDb::open(&fx.home).unwrap();

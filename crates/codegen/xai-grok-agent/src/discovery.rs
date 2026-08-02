@@ -191,14 +191,14 @@ fn merge_subagents(
 /// Deduplicates by name — higher-priority definitions win.
 /// User-level agent directories in priority order: user grok agents, `.claude`
 /// compat agents, then bundled. `.grok` dirs resolve from `grok_home`
-/// (GROK_HOME-aware) plus the legacy literal `~/.grok` when GROK_HOME points
+/// (GROKTOOL_HOME-aware) plus the legacy literal `~/.grok` when GROKTOOL_HOME points
 /// elsewhere; `.claude` resolves from `home`.
 pub(crate) fn user_agent_dirs(
     home: Option<&Path>,
     grok_home: Option<&Path>,
 ) -> Vec<(std::path::PathBuf, AgentScope)> {
     // Legacy literal ~/.grok, included only when it differs from grok_home
-    // (i.e. GROK_HOME points elsewhere) so agents left in the old location are
+    // (i.e. GROKTOOL_HOME points elsewhere) so agents left in the old location are
     // still discovered and stay consistent with scope_from_path classification.
     let legacy_grok = home
         .map(|h| h.join(".grok"))

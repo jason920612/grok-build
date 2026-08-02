@@ -2965,7 +2965,7 @@ email_domain = "example.com"
 fn project_config_never_sources_feedback_user() {
     use xai_grok_test_support::EnvGuard;
     let home = tempfile::tempdir().unwrap();
-    let _env = EnvGuard::set("GROK_HOME", home.path());
+    let _env = EnvGuard::set("GROKTOOL_HOME", home.path());
     let _flag = EnvGuard::unset("GROK_FOLDER_TRUST");
     let _sim = simulate_release_build();
     let repo = tempfile::tempdir().unwrap();
@@ -3440,10 +3440,10 @@ fn explicit_grok_root_is_the_only_user_source() {
 /// effective config ONLY when the folder is trusted; project
 /// `[plugins].disabled` is never gated. The closing set-difference proves
 /// the gate toggles ONLY that path (user/global paths pass through both
-/// verdicts untouched). GROK_HOME-isolated + `#[serial]` for folder-trust
+/// verdicts untouched). GROKTOOL_HOME-isolated + `#[serial]` for folder-trust
 /// store hygiene (empty store ⇒ deterministic untrusted;
-/// `EnvGuard` restores GROK_HOME even on panic). No user-global
-/// `$GROK_HOME/config.toml` is seeded: `grok_home()` is `OnceLock`-cached,
+/// `EnvGuard` restores GROKTOOL_HOME even on panic). No user-global
+/// `$GROKTOOL_HOME/config.toml` is seeded: `grok_home()` is `OnceLock`-cached,
 /// so under a shared-process harness (Bazel) such a seed is read
 /// non-deterministically — reliable only under nextest's process-per-test
 /// isolation.
@@ -3452,7 +3452,7 @@ fn explicit_grok_root_is_the_only_user_source() {
 fn resolve_effective_plugins_config_gates_project_paths_on_folder_trust() {
     use xai_grok_test_support::EnvGuard;
     let home = tempfile::tempdir().unwrap();
-    let _env = EnvGuard::set("GROK_HOME", home.path());
+    let _env = EnvGuard::set("GROKTOOL_HOME", home.path());
     let _flag = EnvGuard::unset("GROK_FOLDER_TRUST");
     let _sim = simulate_release_build();
     let repo = tempfile::tempdir().unwrap();
@@ -3506,14 +3506,14 @@ fn resolve_effective_plugins_config_gates_project_paths_on_folder_trust() {
 /// in `xai-grok-agent`. An ABSOLUTE plugin path is used so the merged
 /// `config_paths` entry resolves against the repo — `discover_plugins`' `is_dir()`
 /// check resolves a relative `./x` against the process cwd, not `cwd`.
-/// GROK_HOME-isolated + `#[serial]` (`EnvGuard` restores it even on panic).
+/// GROKTOOL_HOME-isolated + `#[serial]` (`EnvGuard` restores it even on panic).
 #[test]
 #[serial_test::serial]
 fn discover_plugins_excludes_untrusted_configpath_plugin_end_to_end() {
     use xai_grok_agent::plugins::{TrustStore, discover_plugins};
     use xai_grok_test_support::EnvGuard;
     let home = tempfile::tempdir().unwrap();
-    let _env = EnvGuard::set("GROK_HOME", home.path());
+    let _env = EnvGuard::set("GROKTOOL_HOME", home.path());
     let _flag = EnvGuard::unset("GROK_FOLDER_TRUST");
     let _sim = simulate_release_build();
     let repo = tempfile::tempdir().unwrap();
@@ -3580,14 +3580,14 @@ fn discover_plugins_excludes_untrusted_configpath_plugin_end_to_end() {
 /// under an org kill-switch must end up allowed — if the plugins-config read
 /// ran first, the gate's remote-less backstop would record a durable
 /// kill-switch-blind deny that `resolve_and_record_inner`'s `Some(false)`
-/// arm (store-only reconcile) could never lift. GROK_HOME-isolated (empty
+/// arm (store-only reconcile) could never lift. GROKTOOL_HOME-isolated (empty
 /// store); GROK_FOLDER_TRUST unset so the kill-switch is the only signal.
 #[test]
 #[serial_test::serial]
 fn kill_switched_cold_cwd_stays_allowed_through_plugins_config_read() {
     use xai_grok_test_support::EnvGuard;
     let home = tempfile::tempdir().unwrap();
-    let _env = EnvGuard::set("GROK_HOME", home.path());
+    let _env = EnvGuard::set("GROKTOOL_HOME", home.path());
     let _flag = EnvGuard::unset("GROK_FOLDER_TRUST");
     let _sim = simulate_release_build();
     let repo = tempfile::tempdir().unwrap();
