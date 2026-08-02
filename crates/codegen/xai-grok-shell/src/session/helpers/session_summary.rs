@@ -33,7 +33,12 @@ fn strip_system_reminder_blocks(text: &str) -> String {
         rest = &after_open[end + CLOSE.len()..];
     }
     out.push_str(rest);
-    out.trim().to_string()
+    // These blocks are sealed, and the seal markers sit *outside* the tags
+    // this function matches on — so removing a block would otherwise leave
+    // its opening and closing sentinels behind as orphans in the title
+    // text. The result is display text that never carries authority, so
+    // every reserved code point goes.
+    xai_grok_tools::sentinel::strip_reserved(out.trim()).0
 }
 
 /// Text the session title is derived from: strip system reminders and skill XML

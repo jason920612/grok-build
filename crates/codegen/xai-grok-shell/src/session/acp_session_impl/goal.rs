@@ -913,7 +913,10 @@ impl SessionActor {
                 )
             }
         };
-        format!("<system-reminder>\n{body}\nStart now.\n</system-reminder>\n\n")
+        format!(
+            "{}\n\n",
+            xai_grok_tools::reminders::sealed_reminder(&format!("{body}\nStart now."))
+        )
     }
 
     pub(super) async fn resume_goal(&self) -> GoalResumeOutcome {
@@ -1089,7 +1092,9 @@ impl SessionActor {
                         o.scratch_dir_ready,
                     )
                 };
-                format!("<system-reminder>\n{body}\nContinue working now.\n</system-reminder>")
+                xai_grok_tools::reminders::sealed_reminder(&format!(
+                    "{body}\nContinue working now."
+                ))
             })
         };
         let Some(reminder) = reminder else {

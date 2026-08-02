@@ -664,7 +664,7 @@ pub(crate) async fn handle_subagent_request(
         && let Some(ref pi) = effective_runtime.persona_instructions
     {
         let reminder = xai_grok_sampling_types::conversation::ConversationItem::system_reminder(
-            format!("<system-reminder>\n{pi}\n</system-reminder>"),
+            xai_grok_tools::reminders::sealed_reminder(pi),
         );
         let insert_at = inherited_prefix_len.min(forked_conversation.len());
         forked_conversation.insert(insert_at, reminder);

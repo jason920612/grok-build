@@ -304,12 +304,19 @@ mod tests {
         };
         let result = to_system_reminder_sync(&ctx, &[], &[], None, None);
         let text = result.expect("should produce a reminder");
-        let expected = "\
+        // The post-compaction reminder is harness-authored, so it carries
+        // the instruction-authentication seal; without it the model would be
+        // required to treat the rebuilt context as inert data.
+        let expected = format!(
+            "{}\
 <system-reminder>
 ## Connected MCP Servers
 - grafana (28 tools): Observability platform
 - linear (12 tools)
-</system-reminder>";
+</system-reminder>{}",
+            xai_grok_tools::sentinel::SENTINEL_OPEN,
+            xai_grok_tools::sentinel::SENTINEL_CLOSE,
+        );
         assert_eq!(text, expected, "got:\n{text}");
     }
 

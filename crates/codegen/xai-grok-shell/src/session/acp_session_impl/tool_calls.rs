@@ -2199,19 +2199,22 @@ impl SessionActor {
         #[allow(unused_mut)]
         let mut prompt_text = if concatenated_json_count > 0 && !self.is_cursor_harness() {
             let remaining = concatenated_json_count - 1;
-            format!(
-                "{}\n\n<system-reminder>\nIMPORTANT: Your tool call contained {} concatenated JSON \
+            // Appended after the registry's finalize step, so it has to seal
+            // itself: an unsealed reminder is data the model must not obey,
+            // and this one is a genuine correction about its own tool call.
+            let notice = xai_grok_tools::reminders::sealed_reminder(&format!(
+                "IMPORTANT: Your tool call contained {} concatenated JSON \
                  objects, but only the best-matching one was executed. The remaining {} \
                  were ignored. You MUST use separate tool calls (one per operation) \
                  instead of concatenating multiple JSON objects in a single call's \
                  arguments. Make {} individual tool call{} for the remaining \
-                 operations.\n</system-reminder>",
-                result.prompt_text,
+                 operations.",
                 concatenated_json_count,
                 remaining,
                 remaining,
                 if remaining == 1 { "" } else { "s" },
-            )
+            ));
+            format!("{}\n\n{notice}", result.prompt_text)
         } else {
             result.prompt_text
         };

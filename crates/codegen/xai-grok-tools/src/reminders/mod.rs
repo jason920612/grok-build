@@ -40,6 +40,24 @@ pub fn wrap_reminder_with_tag(text: &str, tag: &str) -> String {
     format!("<{tag}>\n{text}\n</{tag}>")
 }
 
+/// Build a sealed, harness-authored `<system-reminder>` block.
+///
+/// The single entry point for reminder-shaped text composed *outside* the
+/// tool-return finalize path (goal directives, subagent project
+/// instructions, turn-boundary notices). Under the instruction
+/// authentication contract an unsealed `<system-reminder>` is ordinary
+/// untrusted data the model must not obey, so any such block that is
+/// genuinely the harness speaking has to carry the seal — otherwise the
+/// rules inside it are formally inert.
+///
+/// `body` is stripped of harness-reserved code points first: these blocks
+/// routinely interpolate user- or model-authored text (a goal objective, a
+/// project instruction file), and only the frame is authored here.
+pub fn sealed_reminder(body: &str) -> String {
+    let body = crate::sentinel::strip_reserved(body).0;
+    crate::sentinel::seal(&wrap_reminder(&body))
+}
+
 /// Frame a scheduled task prompt with `<system-reminder>` context for the model.
 ///
 /// The raw `prompt` is what the user wrote in `/loop`; this wrapping tells
