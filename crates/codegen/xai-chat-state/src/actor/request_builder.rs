@@ -465,6 +465,15 @@ use crate::types::MEMORY_CONTEXT_OPEN_TAG;
 ///
 /// Returns `true` when the conversation was changed.
 pub(super) fn inject_memory_reminder(items: &mut Vec<ConversationItem>, reminder: &str) -> bool {
+    // Recalled memories are model-written files replayed into the SYSTEM
+    // message — the most authoritative position in the request. Strip
+    // harness-reserved code points so a memory written in an earlier
+    // session (or by a hostile repo that seeded one) cannot arrive
+    // wearing a seal. See `super::mutations::is_reserved_code_point`.
+    let reminder: String = reminder
+        .chars()
+        .filter(|c| !super::mutations::is_reserved_code_point(*c))
+        .collect();
     let reminder = reminder.trim();
     if reminder.is_empty() {
         return false;

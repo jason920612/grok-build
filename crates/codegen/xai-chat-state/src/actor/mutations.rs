@@ -16,7 +16,7 @@ use crate::types::ChatStateSnapshot;
 /// it did not author (see `xai_grok_tools::sentinel`, the canonical
 /// definition — chat-state sits below the tools crate, so the one-line
 /// predicate is mirrored here rather than imported).
-fn is_reserved_code_point(c: char) -> bool {
+pub(super) fn is_reserved_code_point(c: char) -> bool {
     (c as u32) >= 0xF0000
 }
 

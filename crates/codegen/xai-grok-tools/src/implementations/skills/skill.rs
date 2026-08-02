@@ -57,10 +57,15 @@ pub struct SkillOutput {
 /// Used on both the invocation path (skill tool, slash expansion) and
 /// preloading paths (agent definitions) — no separate instruct prefix.
 pub fn build_skill_message(skill: &SkillInfo, content: &str) -> String {
-    format!(
+    // Every field here is disk content from a skill's frontmatter and body
+    // (skills are marketplace-installable), and this block is prepended
+    // into the rendered system prompt. Strip harness-reserved code points
+    // so an installed skill can never ship a sealed instruction block.
+    crate::sentinel::strip_reserved(&format!(
         "<skill name=\"{}\" description=\"{}\" path=\"{}\">\n{}\n</skill>",
         skill.name, skill.description, skill.path, content
-    )
+    ))
+    .0
 }
 
 /// Build a `<skill>` block for user-invoked skill expansion.

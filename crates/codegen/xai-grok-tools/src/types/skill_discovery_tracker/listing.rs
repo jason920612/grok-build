@@ -594,15 +594,22 @@ pub fn format_announcement_xml(
             .map(|s| build_skill_entry(s, real_prefix, display_prefix, !verbatim))
             .collect(),
     );
+    // Entries carry skill names, descriptions, and paths read from disk;
+    // the listing is injected into the conversation as an
+    // `<agent_skills>` block. Strip harness-reserved code points so a
+    // discovered skill cannot smuggle a seal into that injection.
+    let strip = |s: String| crate::sentinel::strip_reserved(&s).0;
     match mode {
-        XmlRenderMode::Verbatim => listing.render_xml_verbatim(),
+        XmlRenderMode::Verbatim => listing.render_xml_verbatim().map(strip),
         XmlRenderMode::Budgeted {
             budget_chars,
             overflow_indicator,
-        } => listing.render_xml_budgeted(
-            budget_chars.unwrap_or(DEFAULT_CHAR_BUDGET),
-            overflow_indicator,
-        ),
+        } => listing
+            .render_xml_budgeted(
+                budget_chars.unwrap_or(DEFAULT_CHAR_BUDGET),
+                overflow_indicator,
+            )
+            .map(strip),
     }
 }
 

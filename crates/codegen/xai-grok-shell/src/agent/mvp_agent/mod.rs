@@ -1036,7 +1036,7 @@ fn build_spawn_system_prompt(
         session_meta,
         init_meta,
     ) {
-        override_prompt.to_owned()
+        with_authentication_contract(override_prompt)
     } else {
         let mut prompt = agent_system_prompt.to_owned();
         if let Some(rules) = read_session_or_init_meta_str(
@@ -1044,11 +1044,33 @@ fn build_spawn_system_prompt(
             init_meta,
             "rules",
         ) {
+            // Client-supplied rules are external content landing in the
+            // system message; strip harness-reserved code points so they
+            // cannot arrive sealed.
+            let rules = xai_grok_tools::sentinel::strip_reserved(rules).0;
             prompt.push_str("\n\n<human_rules>\n");
-            prompt.push_str(rules);
+            prompt.push_str(&rules);
             prompt.push_str("\n</human_rules>");
         }
         prompt
+    }
+}
+
+/// A client-supplied `systemPromptOverride` replaces the rendered prompt
+/// wholesale — including the instruction-authentication contract. Sealed
+/// rule packs would then arrive with nothing telling the model what the
+/// seal means, so the contract is re-appended whenever consequence-channel
+/// rule delivery is active. The override's own text is stripped of
+/// reserved code points first: it is client input, not harness authorship.
+fn with_authentication_contract(override_prompt: &str) -> String {
+    let clean = xai_grok_tools::sentinel::strip_reserved(override_prompt).0;
+    if xai_grok_tools::guardrails::guardrails().rule_injection {
+        format!(
+            "{clean}\n\n{}",
+            xai_grok_tools::sentinel::authentication_contract()
+        )
+    } else {
+        clean
     }
 }
 /// Enqueue a `ReplaceSystemPrompt` for a resident session actor. No-op when
@@ -1071,7 +1093,7 @@ fn enqueue_replace_system_prompt_override(
     };
     let _ = cmd_tx
         .send(crate::session::SessionCommand::ReplaceSystemPrompt {
-            system_prompt: override_prompt.to_owned(),
+            system_prompt: with_authentication_contract(override_prompt),
         });
 }
 /// Warn that a `ValidateType` arrived for an evicted/unknown parent session,
