@@ -1842,11 +1842,26 @@ impl FinalizedToolset {
         };
         let prompt_text = {
             let raw = output.to_prompt_format();
-            match kind {
+            let defended = match kind {
                 Some(k) => crate::antiinjection::defend_output(raw, k, effective).0,
                 // Unknown kind still gets sentinel stripping — no channel
                 // may carry reserved code points the harness did not write.
                 None => crate::sentinel::strip_reserved(&raw).0,
+            };
+            // MCP servers are third-party processes whose output is as
+            // attacker-reachable as a fetched web page, but they register as
+            // `ToolKind::Other`, so `kind_is_external` never fences them.
+            // The output variant is the reliable discriminator: fence here
+            // so remote MCP payloads carry the same provenance anchor as
+            // web content. `defend_output` already sanitized the markers;
+            // this only adds the fence, and only when it is not already one.
+            if matches!(output, ToolOutput::MCP(_))
+                && kind.is_none_or(|k| !crate::antiinjection::kind_is_external(k))
+                && crate::guardrails::guardrails().antiinjection
+            {
+                crate::antiinjection::fence_untrusted_output(&defended, effective)
+            } else {
+                defended
             }
         };
         let prompt_text = crate::reminders::format_with_reminders(

@@ -203,8 +203,22 @@ pub(crate) fn prune_conversation(conversation: &mut [ConversationItem], config: 
         if content_len > config.soft_trim_threshold {
             let head = safe_char_slice(&tool_result.content, 0, config.soft_trim_head);
             let tail = safe_char_slice_tail(&tool_result.content, config.soft_trim_tail);
-            tool_result.content =
-                std::sync::Arc::<str>::from(format!("{head}{SOFT_TRIM_SEPARATOR}{tail}"));
+            // Cutting the middle out can orphan a sentinel: keep an opening
+            // marker while its closing marker lands in the discarded span and
+            // every following byte reads as sealed harness instruction — a
+            // forgery vector the trimmer would create by itself. A sliced
+            // rule pack is not a valid harness block anyway, so drop the
+            // reserved code points and let the remainder read as plain data.
+            let stripped = |s: &str| -> String {
+                s.chars()
+                    .filter(|c| !super::mutations::is_reserved_code_point(*c))
+                    .collect()
+            };
+            tool_result.content = std::sync::Arc::<str>::from(format!(
+                "{}{SOFT_TRIM_SEPARATOR}{}",
+                stripped(&head),
+                stripped(&tail)
+            ));
         }
     }
 }

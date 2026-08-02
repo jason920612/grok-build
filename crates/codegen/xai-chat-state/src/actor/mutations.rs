@@ -716,3 +716,47 @@ mod sanitize_tests {
         assert_eq!(text_of(&item), "normal 中文 → text");
     }
 }
+
+#[cfg(test)]
+mod trim_seal_tests {
+    use crate::actor::request_builder::prune_conversation;
+    use crate::types::PruningConfig;
+    use std::sync::Arc;
+    use xai_grok_sampling_types::ConversationItem;
+
+    const OPEN: char = '\u{F0000}';
+    const CLOSE: char = '\u{F0001}';
+
+    /// Soft-trim cuts the middle out of a long tool result. A sealed rule
+    /// pack straddling that cut would leave an orphan opening marker, and
+    /// every byte after it would read as sealed harness instruction — a
+    /// forgery vector the trimmer creates on its own. Trimmed results must
+    /// therefore carry no reserved code points at all.
+    #[test]
+    fn soft_trim_never_leaves_an_orphan_sentinel() {
+        let cfg = PruningConfig::default();
+        let sealed_early = format!("{OPEN}<system-reminder>rule</system-reminder>{CLOSE}");
+        // Seal near the start, then enough filler that the middle is cut.
+        let content = format!("{sealed_early}{}", "x".repeat(cfg.soft_trim_threshold * 3));
+        let mut items = vec![ConversationItem::tool_result("call-1", content)];
+        // Enough later turns that the result is old enough to soft-trim but
+        // not old enough to hard-clear.
+        for i in 0..cfg.keep_last_n_turns + 1 {
+            items.push(ConversationItem::User(xai_grok_sampling_types::UserItem {
+                content: vec![xai_grok_sampling_types::ContentPart::Text {
+                    text: Arc::from(format!("turn {i}")),
+                }],
+                ..Default::default()
+            }));
+        }
+        prune_conversation(&mut items, &cfg);
+        let ConversationItem::ToolResult(tr) = &items[0] else {
+            panic!("expected tool result")
+        };
+        assert!(
+            !tr.content.contains(OPEN) && !tr.content.contains(CLOSE),
+            "a trimmed result must carry no seal markers: {:?}",
+            tr.content
+        );
+    }
+}
