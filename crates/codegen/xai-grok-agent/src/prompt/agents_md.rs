@@ -345,18 +345,28 @@ fn render_agents_md(configs: &[AgentConfigFile]) -> Option<String> {
     );
 
     for config in configs {
+        // Project files are untrusted bytes: defang forged reminder tags
+        // AND strip reserved sentinel code points so repo content can
+        // never impersonate a sealed harness block.
+        let clean_path = xai_grok_tools::sentinel::strip_reserved(&config.file_path).0;
+        let clean_content = xai_grok_tools::sentinel::strip_reserved(&config.content).0;
         section.push_str(&format!(
             "\n## From: {}\n",
-            neutralize_reminder_tags(&config.file_path)
+            neutralize_reminder_tags(&clean_path)
         ));
-        section.push_str(&neutralize_reminder_tags(&config.content));
+        section.push_str(&neutralize_reminder_tags(&clean_content));
         section.push('\n');
     }
 
     section.push_str("\nFollow these instructions exactly. When working in subdirectories not listed above, check for additional project instruction files (AGENTS.md, Claude.md, etc.).");
     section.push_str("\n</system-reminder>");
 
-    Some(section)
+    // Seal the harness frame (not the inner content — that was stripped
+    // above, so it cannot carry sentinels of its own). New copies are
+    // detected via `SyntheticReason::ProjectInstructions`, so prepending
+    // the sentinel does not disturb dedup; `LEGACY_AGENTS_MD_REMINDER_PREFIX`
+    // matching only ever runs against pre-sentinel stored sessions.
+    Some(xai_grok_tools::sentinel::seal(&section))
 }
 
 #[cfg(test)]

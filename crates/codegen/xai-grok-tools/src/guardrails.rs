@@ -54,6 +54,12 @@ pub struct Guardrails {
     /// delimiter + data anchor. Counters the model's own trust in tool
     /// returns being turned against it.
     pub antiinjection: bool,
+    /// Consequence-channel rule delivery: behavioral rules are moved out
+    /// of the system prompt and appended to tool results as sealed rule
+    /// packs (see `crate::rule_injection`). Models respect the channel
+    /// that carries consequences; the sentinel seal keeps it unforgeable.
+    /// When off, prompt templates render their full traditional rules.
+    pub rule_injection: bool,
 }
 
 impl Default for Guardrails {
@@ -67,6 +73,7 @@ impl Default for Guardrails {
             stuck_gate: true,
             adjutant: true,
             antiinjection: true,
+            rule_injection: true,
         }
     }
 }
@@ -91,6 +98,7 @@ fn resolve_from_env() -> Guardrails {
             stuck_gate: false,
             adjutant: false,
             antiinjection: false,
+            rule_injection: false,
         },
         _ => Guardrails::default(),
     };
@@ -122,6 +130,9 @@ fn resolve_from_env() -> Guardrails {
     }
     if let Some(v) = env_flag("GROK_GUARDRAIL_ANTIINJECTION") {
         g.antiinjection = v;
+    }
+    if let Some(v) = env_flag("GROK_GUARDRAIL_RULE_INJECTION") {
+        g.rule_injection = v;
     }
     g
 }

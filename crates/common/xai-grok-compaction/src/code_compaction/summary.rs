@@ -17,7 +17,11 @@
 /// block. A summary that already leads with a numbered section is preserved
 /// verbatim even when it quotes `</analysis>`/`<summary>` in a later section.
 pub fn format_compact_summary(summary: &str) -> String {
-    let mut result = summary.to_string();
+    // The summary is model output. Strip harness-reserved sentinel code
+    // points (planes 15–16; see `xai_grok_tools::sentinel` — mirrored here
+    // because this crate sits below the tools crate) so a summary can never
+    // carry a sealed harness-instruction block into the rebuilt context.
+    let mut result: String = summary.chars().filter(|c| (*c as u32) < 0xF0000).collect();
 
     // 1. Remove leading <analysis>…</analysis> drafting block(s). A block is
     //    only stripped when it is a genuinely LEADING scratchpad: top-level

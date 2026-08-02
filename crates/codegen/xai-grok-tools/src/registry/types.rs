@@ -1063,6 +1063,7 @@ impl ToolRegistryBuilder {
             resources.insert(crate::types::resources::SystemRemindersEnabled(false));
         }
         resources.register_state::<crate::reminders::task_completion::ReportedTaskCompletions>();
+        resources.register_state::<crate::rule_injection::RuleInjectionState>();
         resources.register_state::<crate::implementations::grok_build::todo::TodoState>();
         resources.register_state::<crate::types::resources::WebCitationCounter>();
         resources
@@ -1689,7 +1690,13 @@ impl FinalizedToolset {
                 tracker.gate_armed = true;
                 tracker.gate_reason = format!(
                     "'{tool_name}': {}",
-                    message.lines().next().unwrap_or("").chars().take(80).collect::<String>()
+                    message
+                        .lines()
+                        .next()
+                        .unwrap_or("")
+                        .chars()
+                        .take(80)
+                        .collect::<String>()
                 );
             }
             (episode, armed)
@@ -1824,20 +1831,22 @@ impl FinalizedToolset {
         // external-source content. Reminders are harness-authored and keep
         // their real (trusted) tags — so a forged tag in the payload is
         // neutralized while the genuine reminder channel is untouched.
+        // Resolve the effective tool kind (through use_tool indirection).
+        let effective = effective_tool_name.as_deref().unwrap_or(tool_name);
+        let kind = {
+            let tools = self.tools.read();
+            tools
+                .iter()
+                .find(|t| t.client_name == effective)
+                .map(|t| t.metadata.kind())
+        };
         let prompt_text = {
             let raw = output.to_prompt_format();
-            // Resolve the effective tool kind (through use_tool indirection).
-            let effective = effective_tool_name.as_deref().unwrap_or(tool_name);
-            let kind = {
-                let tools = self.tools.read();
-                tools
-                    .iter()
-                    .find(|t| t.client_name == effective)
-                    .map(|t| t.metadata.kind())
-            };
             match kind {
                 Some(k) => crate::antiinjection::defend_output(raw, k, effective).0,
-                None => raw,
+                // Unknown kind still gets sentinel stripping — no channel
+                // may carry reserved code points the harness did not write.
+                None => crate::sentinel::strip_reserved(&raw).0,
             }
         };
         let prompt_text = crate::reminders::format_with_reminders(
@@ -1845,6 +1854,16 @@ impl FinalizedToolset {
             reminders,
             self.system_reminder_tag,
         );
+        // Consequence-channel rule delivery: behavioral rules ride the
+        // tool-return path (sealed, so they cannot be forged) instead of
+        // the system prompt. See `crate::rule_injection`.
+        let prompt_text = crate::rule_injection::append_due_rules(
+            prompt_text,
+            kind,
+            &self.resources,
+            self.system_reminder_tag,
+        )
+        .await;
         {
             let res = self.resources.lock().await;
             self.resources_persistence.save(&res);
@@ -2288,10 +2307,12 @@ mod tests {
         let toolset = Arc::new(builder.finalize(config, ctx).expect("finalize"));
         {
             let mut res = toolset.resources.lock().await;
-            res.insert(crate::implementations::grok_build::blackboard::BlackboardCfg {
-                path: tmp.path().join("blackboard.jsonl"),
-                author: "main".to_string(),
-            });
+            res.insert(
+                crate::implementations::grok_build::blackboard::BlackboardCfg {
+                    path: tmp.path().join("blackboard.jsonl"),
+                    author: "main".to_string(),
+                },
+            );
         }
         let mut saw_nudge = false;
         for i in 0..15 {
@@ -3317,6 +3338,14 @@ mod tests {
     #[tokio::test]
     async fn call_streaming_forwards_progress_and_finalizes_terminal() {
         use futures::StreamExt;
+        // Rule injection is stateful (packs fire once, then refresh on a
+        // gap), which would make the two calls below produce different
+        // prompt_text. This test is about streaming/terminal parity, so
+        // pin the guardrail off.
+        let _rails = crate::guardrails::set_guardrails_for_test(crate::guardrails::Guardrails {
+            rule_injection: false,
+            ..Default::default()
+        });
         let tmp = TempDir::new().unwrap();
         let builder = ToolRegistryBuilder::new();
         let config = ToolServerConfig {

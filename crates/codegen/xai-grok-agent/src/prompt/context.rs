@@ -235,6 +235,13 @@ impl PromptContext {
     /// These are the agent-specific values that get merged with the
     /// tool context in `TemplateRenderer::render_with_extra()`.
     pub fn placeholders(&self) -> serde_json::Value {
+        // Consequence-channel rule delivery: when active, templates render
+        // their slim form (identity + authentication contract) and the
+        // behavioral rules ride tool results instead (see
+        // `xai_grok_tools::rule_injection`). When the guardrail is off the
+        // templates fall back to their traditional full-rule form, so the
+        // rules are never absent from both channels.
+        let rules_in_band = xai_grok_tools::guardrails::guardrails().rule_injection;
         serde_json::json!({
             "memory_enabled": self.memory_enabled,
             "memory_global_path": self.memory_global_path.as_deref().unwrap_or(""),
@@ -247,6 +254,8 @@ impl PromptContext {
             "current_date": self.current_date.as_deref().unwrap_or(""),
             "is_non_interactive": self.is_non_interactive,
             "system_prompt_label": self.system_prompt_label.as_str(),
+            "rules_in_band": rules_in_band,
+            "instruction_authentication": xai_grok_tools::sentinel::authentication_contract(),
         })
     }
     /// Render the full system prompt via `ToolBridge`.

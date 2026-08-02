@@ -113,9 +113,10 @@ impl Agent {
 
     /// Compact system prompt for post-compaction use.
     ///
-    /// Returns a static string — the compact prompt never changes at runtime.
-    pub fn compact_system_prompt(&self) -> &str {
-        crate::prompt::template::COMPACT_SYSTEM_PROMPT
+    /// Includes the instruction-authentication contract when
+    /// consequence-channel rule delivery is active.
+    pub fn compact_system_prompt(&self) -> String {
+        crate::prompt::template::compact_system_prompt_text()
     }
 
     /// The tool bridge for this agent.

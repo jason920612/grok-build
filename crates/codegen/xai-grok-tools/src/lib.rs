@@ -30,6 +30,8 @@ pub mod persistence;
 pub mod registry;
 pub mod reminders;
 pub mod retry;
+pub mod rule_injection;
+pub mod sentinel;
 pub mod tool_taxonomy;
 pub mod types;
 pub mod util;

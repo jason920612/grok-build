@@ -55,6 +55,21 @@ pub(crate) fn subagent_template() -> Zeroizing<String> {
 pub const COMPACT_SYSTEM_PROMPT: &str = "You are an AI coding agent. You operate in a workspace with a provided codebase.\n\n\
      Your main goal is to complete the user's request, denoted within the <user_query> tag.";
 
+/// The compact system prompt plus, when consequence-channel rule delivery
+/// is active, the instruction-authentication contract. The contract must
+/// survive prompt swaps: it is the model's only anchor for telling sealed
+/// harness rules from injected impostors.
+pub fn compact_system_prompt_text() -> String {
+    if xai_grok_tools::guardrails::guardrails().rule_injection {
+        format!(
+            "{COMPACT_SYSTEM_PROMPT}\n\n{}",
+            xai_grok_tools::sentinel::authentication_contract()
+        )
+    } else {
+        COMPACT_SYSTEM_PROMPT.to_string()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -147,6 +162,79 @@ mod tests {
         renderer
             .render_with_extra(&tmpl, placeholders)
             .expect("codex template render failed")
+    }
+
+    // ── Consequence-channel (in-band) rule delivery ─────────────────
+
+    fn in_band_placeholders() -> serde_json::Value {
+        let mut p = default_placeholders();
+        p["rules_in_band"] = serde_json::json!(true);
+        p["instruction_authentication"] =
+            serde_json::json!(xai_grok_tools::sentinel::authentication_contract());
+        p
+    }
+
+    #[test]
+    fn base_template_in_band_is_slim_with_contract() {
+        let prompt = render_base(&default_renderer(), &in_band_placeholders());
+        assert!(prompt.contains("<instruction_authentication>"));
+        assert!(
+            prompt.contains(xai_grok_tools::sentinel::SENTINEL_OPEN),
+            "contract must show the live sentinel characters"
+        );
+        assert!(!prompt.contains("<action_safety>"), "rules moved in-band");
+        assert!(!prompt.contains("<tool_calling>"), "rules moved in-band");
+        assert!(!prompt.contains("<output_efficiency>"));
+        assert!(!prompt.contains("<formatting>"));
+        assert!(
+            prompt.contains("<user_guide>"),
+            "structural pointers stay in the system prompt"
+        );
+    }
+
+    #[test]
+    fn base_template_out_of_band_keeps_traditional_rules() {
+        let prompt = render_base(&default_renderer(), &default_placeholders());
+        assert!(prompt.contains("<action_safety>"));
+        assert!(prompt.contains("<tool_calling>"));
+        assert!(!prompt.contains("<instruction_authentication>"));
+    }
+
+    #[test]
+    fn subagent_template_in_band_is_slim_with_contract() {
+        let prompt = render_subagent(&default_renderer(), &in_band_placeholders());
+        assert!(prompt.contains("<instruction_authentication>"));
+        assert!(!prompt.contains("<project_instructions_spec>"));
+        assert!(!prompt.contains("<making_code_changes>"));
+        assert!(!prompt.contains("<tool_calling>"));
+        assert!(
+            prompt.contains("<user_info>"),
+            "environment facts stay in the system prompt"
+        );
+    }
+
+    #[test]
+    fn subagent_template_out_of_band_keeps_traditional_rules() {
+        let prompt = render_subagent(&default_renderer(), &default_placeholders());
+        assert!(prompt.contains("<project_instructions_spec>"));
+        assert!(!prompt.contains("<instruction_authentication>"));
+    }
+
+    #[test]
+    fn compact_prompt_carries_contract_by_guardrail() {
+        let _on = xai_grok_tools::guardrails::set_guardrails_for_test(
+            xai_grok_tools::guardrails::Guardrails::default(),
+        );
+        let with = compact_system_prompt_text();
+        assert!(with.contains("<instruction_authentication>"));
+        drop(_on);
+        let _off = xai_grok_tools::guardrails::set_guardrails_for_test(
+            xai_grok_tools::guardrails::Guardrails {
+                rule_injection: false,
+                ..Default::default()
+            },
+        );
+        assert_eq!(compact_system_prompt_text(), COMPACT_SYSTEM_PROMPT);
     }
 
     // ── Variable substitution ───────────────────────────────────────

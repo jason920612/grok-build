@@ -117,3 +117,6 @@ workspace = true
 default-bazel = ["serde"]
 default = ["serde"]
 serde = []
+# Exposes test-only helpers (e.g. `guardrails::set_guardrails_for_test`)
+# to downstream crates' test builds via dev-dependencies.
+test-support = []

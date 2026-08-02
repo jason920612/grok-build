@@ -361,6 +361,14 @@ pub fn render_completion_output_delivery(
     disk_pointer_footer: Option<&str>,
 ) {
     use std::fmt::Write as _;
+    // The inlined output is untrusted (command stdout / subagent report)
+    // but lands inside a harness-authored, sealed reminder frame. Strip
+    // reserved sentinel code points so it cannot smuggle or close a seal,
+    // and defang forged trusted markers so it cannot speak in the
+    // harness's voice from inside the sealed block.
+    let cleaned =
+        crate::antiinjection::sanitize_untrusted(&crate::sentinel::strip_reserved(output).0).0;
+    let output = cleaned.as_str();
     match task_output_name {
         Some(name) => {
             let _ = write!(buf, "Use {name}(\"{subagent_id}\") to see the full output.");

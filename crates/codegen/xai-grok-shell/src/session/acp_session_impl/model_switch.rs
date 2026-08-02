@@ -83,7 +83,7 @@ impl SessionActor {
                 if let ConversationItem::System(sys) = item {
                     if use_concise {
                         sys.content = std::sync::Arc::<str>::from(
-                            xai_grok_agent::prompt::template::COMPACT_SYSTEM_PROMPT,
+                            xai_grok_agent::prompt::template::compact_system_prompt_text().as_str(),
                         );
                     } else {
                         sys.content =

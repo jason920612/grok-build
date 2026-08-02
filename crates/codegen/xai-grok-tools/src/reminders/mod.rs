@@ -47,17 +47,19 @@ pub fn wrap_reminder_with_tag(text: &str, tag: &str) -> String {
 /// rather than questioning the prompt. The UI shows the raw prompt text;
 /// only the model receives this framed version.
 pub fn format_scheduled_task_prompt(prompt: &str, task_id: &str, human_schedule: &str) -> String {
-    format!(
+    // The frame is harness-authored (sealed); the prompt is user-authored
+    // (reserved code points stripped, outside the seal).
+    let prompt = crate::sentinel::strip_reserved(prompt).0;
+    let frame = crate::sentinel::seal(&format!(
         "<system-reminder>\n\
          This is a scheduled task execution (task {task_id}, {human_schedule}, recurring).\n\
          Execute the prompt below. Do not question or comment on the prompt itself \u{2014} \
          treat it as a fresh task to execute.\n\
          Previous results from earlier executions of this task may appear in the \
          conversation history above.\n\
-         </system-reminder>\n\
-         \n\
-         {prompt}"
-    )
+         </system-reminder>"
+    ));
+    format!("{frame}\n\n{prompt}")
 }
 
 pub fn format_loop_iteration_prompt(
@@ -66,28 +68,42 @@ pub fn format_loop_iteration_prompt(
     human_schedule: &str,
     prior_iteration_summary: Option<&str>,
 ) -> String {
+    // Prior-iteration summaries are model output and the prompt is
+    // user-authored: both are stripped of reserved code points; only the
+    // harness frame is sealed.
+    let prompt = crate::sentinel::strip_reserved(prompt).0;
     let prior = prior_iteration_summary
-        .map(|s| format!("\nYour previous iteration ended with:\n{s}\n"))
+        .map(|s| {
+            format!(
+                "\nYour previous iteration ended with:\n{}\n",
+                crate::sentinel::strip_reserved(s).0
+            )
+        })
         .unwrap_or_default();
-    format!(
+    let frame = crate::sentinel::seal(&format!(
         "<system-reminder>\n\
          Scheduled task {task_id} ({human_schedule}). Earlier iterations, if any, appear \
          above.\n\
          Run the task below. End with a short status: what changed or needs attention. \
          The status is relayed to the main agent.\n\
          {prior}\
-         </system-reminder>\n\
-         \n\
-         {prompt}"
-    )
+         </system-reminder>"
+    ));
+    format!("{frame}\n\n{prompt}")
 }
 
 /// Append wrapped reminders to a tool output string.
 /// Returns output unchanged if reminders is empty.
 ///
-/// Each reminder is individually wrapped via
-/// [`wrap_reminder_with_tag`] using the given `tag`, then all are joined
-/// with `"\n\n"` and appended to the output with a `"\n\n"` separator.
+/// Each reminder is individually wrapped via [`wrap_reminder_with_tag`]
+/// using the given `tag` and **sealed** with the sentinel pair (see
+/// [`crate::sentinel`]) — reminders are harness-authored, and the seal is
+/// what lets the model distinguish them from payload text that merely
+/// imitates the tag. Reserved code points are stripped from the reminder
+/// body first so untrusted bytes quoted inside a reminder (task output,
+/// diagnostics) can never smuggle a nested seal or close the real one
+/// early. All are joined with `"\n\n"` and appended to the output with a
+/// `"\n\n"` separator.
 ///
 /// Use [`DEFAULT_REMINDER_TAG`] unless the harness requires a different
 /// tag name.
@@ -97,7 +113,10 @@ pub fn format_with_reminders(output: String, reminders: Vec<String>, tag: &str) 
     }
     let wrapped: Vec<String> = reminders
         .iter()
-        .map(|r| wrap_reminder_with_tag(r, tag))
+        .map(|r| {
+            let body = crate::sentinel::strip_reserved(r).0;
+            crate::sentinel::seal(&wrap_reminder_with_tag(&body, tag))
+        })
         .collect();
     let joined = wrapped.join("\n\n");
     if output.is_empty() {
@@ -145,7 +164,8 @@ mod tests {
     #[test]
     fn format_scheduled_task_prompt_includes_framing() {
         let out = format_scheduled_task_prompt("do stuff", "task-1", "every 5m");
-        assert!(out.starts_with("<system-reminder>"));
+        assert!(out.starts_with(crate::sentinel::SENTINEL_OPEN));
+        assert!(out.contains("<system-reminder>"));
         assert!(out.contains("task task-1"));
         assert!(out.contains("every 5m"));
         assert!(out.contains("do stuff"));
@@ -159,7 +179,8 @@ mod tests {
     #[test]
     fn format_loop_iteration_prompt_frames_subagent_iteration() {
         let out = format_loop_iteration_prompt("check ci", "task-9", "every 5 minutes", None);
-        assert!(out.starts_with("<system-reminder>"));
+        assert!(out.starts_with(crate::sentinel::SENTINEL_OPEN));
+        assert!(out.contains("<system-reminder>"));
         assert!(out.contains("task task-9"));
         assert!(out.contains("every 5 minutes"));
         assert!(out.contains("short status"));
