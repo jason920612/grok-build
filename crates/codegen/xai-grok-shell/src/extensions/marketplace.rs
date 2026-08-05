@@ -866,6 +866,39 @@ async fn handle_add_source(url: &str) -> xai_hooks_plugins_types::ActionOutcome 
         };
     }
 
+    // Reject URLs that aren't reachable git repos (e.g. MCP endpoints pasted
+    // into the wrong tab) before persisting. The probe blocks on a git
+    // subprocess, so run it off the LocalSet.
+    if let MarketplaceAddInput::GitUrl(git_url) = &input {
+        let probe_url = git_url.clone();
+        let probe = tokio::task::spawn_blocking(move || {
+            xai_grok_plugin_marketplace::git::probe_git_remote(&probe_url)
+        })
+        .await;
+        match probe {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => {
+                return ActionOutcome {
+                    status: OutcomeStatus::ValidationError,
+                    message: format!(
+                        "{e}. Not a reachable git repository — to add it anyway (e.g. a \
+                         VPN-gated host), run: grok plugin marketplace add {url} --force"
+                    ),
+                    requires_reload: false,
+                    requires_restart: false,
+                };
+            }
+            Err(e) => {
+                return ActionOutcome {
+                    status: OutcomeStatus::InternalError,
+                    message: format!("Probe task failed: {e}"),
+                    requires_reload: false,
+                    requires_restart: false,
+                };
+            }
+        }
+    }
+
     let is_official = matches!(&input, MarketplaceAddInput::GitUrl(u)
         if xai_grok_plugin_marketplace::is_official_source_url(u));
     let name = if is_official {
@@ -1235,7 +1268,7 @@ fn read_default_skills_installs_purged(config_path: &std::path::Path) -> bool {
 ///
 /// Gated by sticky `default_skills_installs_purged` in config.toml. Best-effort:
 /// errors are logged and never block startup.
-pub fn purge_default_skills_installs(grok_home: &std::path::Path) {
+pub(crate) fn purge_default_skills_installs(grok_home: &std::path::Path) {
     purge_default_skills_installs_impl(grok_home, || {
         xai_grok_agent::plugins::install_registry::InstallRegistry::try_load_from(
             xai_grok_agent::plugins::install_registry::InstallRegistry::resolve_install_dir(),
@@ -1335,7 +1368,7 @@ fn purge_default_skills_installs_impl(
 /// `official_marketplace_auto_installed` is set. Under a process-wide flock it
 /// adds the source (or just sets the flag if it's already present in config.toml
 /// or a JSON store). Best-effort: errors are logged and never block startup.
-pub fn ensure_official_marketplace_source(grok_home: &std::path::Path) {
+pub(crate) fn ensure_official_marketplace_source(grok_home: &std::path::Path) {
     let config_path = grok_home.join("config.toml");
 
     if read_official_marketplace_auto_installed(&config_path) {

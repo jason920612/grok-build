@@ -10,11 +10,9 @@ use super::queue::{
     maybe_drain_queue, note_peek_page_flip, push_server_queue_echo, retire_optimistic_echo,
 };
 use super::router::dispatch;
-use super::session::fork::open_project_question;
-use super::session::lifecycle::skip_picker_and_create_session;
-use super::voice::voice_stop_on_submit;
+use super::voice::{merge_prompt_with_voice_interim, voice_stop_on_submit};
 use crate::app::actions::{Action, DoctorFixTarget, Effect};
-use crate::app::agent::{AgentId, AgentState};
+use crate::app::agent::{AgentCommand, AgentId, AgentState};
 use crate::app::agent_view::AgentView;
 use crate::app::app_view::{ActiveView, AppView};
 use crate::notifications::{NotificationEvent, NotificationEventKind};
@@ -55,12 +53,14 @@ pub(crate) fn dispatch_initial_prompt(app: &mut AppView, prompt: String) -> Vec<
     effects
 }
 
-pub(super) fn collect_live_doctor_report(
+pub(super) fn collect_live_doctor_report_for_terminal(
     app: &AppView,
     agent_id: AgentId,
+    terminal: &crate::terminal::TerminalContext,
 ) -> Option<crate::diagnostics::DiagnosticReport> {
     let agent = app.agents.get(&agent_id)?;
-    let mut report = crate::slash::commands::doctor::DoctorCommand::report(
+    let mut report = crate::slash::commands::doctor::DoctorCommand::report_for_terminal(
+        terminal,
         app.screen_mode,
         crate::diagnostics::TuiRuntimeRequest {
             workspace: &agent.session.cwd,
@@ -88,7 +88,8 @@ pub(super) fn dispatch_doctor(request: DoctorRequest, app: &mut AppView) -> Vec<
     let ActiveView::Agent(agent_id) = app.active_view else {
         return vec![];
     };
-    let Some(report) = collect_live_doctor_report(app, agent_id) else {
+    let terminal = crate::terminal::terminal_context().clone();
+    let Some(report) = collect_live_doctor_report_for_terminal(app, agent_id, &terminal) else {
         return vec![];
     };
 
@@ -108,7 +109,7 @@ pub(super) fn dispatch_doctor(request: DoctorRequest, app: &mut AppView) -> Vec<
             return vec![Effect::PlanDoctorFix {
                 target,
                 report: Box::new(report),
-                terminal: crate::terminal::terminal_context().clone(),
+                terminal,
                 request,
             }];
         }
@@ -136,9 +137,6 @@ pub(super) fn open_doctor_fix_question(
         return;
     }
     let preview = crate::diagnostics::format_fix_preview(&plan);
-    agent
-        .scrollback
-        .push_block(RenderBlock::system(preview.clone()));
     let question = Question {
         question: "Apply this fix?".to_owned(),
         options: vec![
@@ -150,7 +148,7 @@ pub(super) fn open_doctor_fix_question(
             },
             QuestionOption {
                 label: "Cancel".to_owned(),
-                description: "Do not change your shell configuration.".to_owned(),
+                description: "Do not change the configuration.".to_owned(),
                 preview: None,
                 id: None,
             },
@@ -400,17 +398,6 @@ fn maybe_show_send_now_tip(app: &mut AppView) {
     }
 }
 
-/// Whether submitting `text` may open the project picker. Slash commands,
-/// `exit`/`quit` aliases, and empty input never send a prompt to the agent,
-/// so they must pass through untouched.
-pub(super) fn input_can_trigger_project_picker(text: &str) -> bool {
-    let t = text.trim();
-    !t.is_empty()
-        && !t.starts_with('/')
-        && !t.starts_with('!')
-        && !matches!(t, "exit" | "quit" | ":q" | ":q!" | ":wq" | ":wq!")
-}
-
 /// Body of [`dispatch_send_prompt`], parameterized over whether to consume
 /// the prompt textarea after the command is processed.
 ///
@@ -422,9 +409,7 @@ pub(super) fn input_can_trigger_project_picker(text: &str) -> bool {
 /// resolution and the downstream `Effect`s are identical in both cases.
 ///
 /// `literal = true` (follow-up chip click) submits `text` straight to the
-/// model: the slash-command, exit-alias, and project-picker branches are all
-/// skipped so server/model-controlled chip text can never execute a command
-/// nor be diverted into the project question.
+/// model: the slash-command and exit-alias branches are skipped so server/model-controlled chip text can never execute a command.
 pub(super) fn dispatch_send_prompt_inner(
     app: &mut AppView,
     text: String,
@@ -441,21 +426,17 @@ pub(super) fn dispatch_send_prompt_inner(
     // the common funnel so every submit path is covered, before any early-return
     // guard below.
     app.pending_action = None;
-    // Releases the mic and drops the recording target so a late in-flight final
-    // can't refill the prompt the user just sent.
-    voice_stop_on_submit(app);
+    // Promote interim + hard-reset; merge only when consuming the composer.
+    let interim = voice_stop_on_submit(app);
+    let text = if consume_input {
+        merge_prompt_with_voice_interim(text, interim)
+    } else {
+        text
+    };
 
     if app.reconnect_pending {
         app.show_toast("Reconnecting, please wait...");
         return vec![];
-    }
-
-    // The picker intercepts only real, user-authored prompts; slash commands,
-    // exit aliases, empty input, and literal chip submissions pass through so
-    // they never spawn it (a chip is a model suggestion for an already-running
-    // session, not the first-prompt project choice).
-    if !literal && input_can_trigger_project_picker(&text) && app.needs_project_picker() {
-        return open_project_question(app, text);
     }
 
     let ActiveView::Agent(id) = app.active_view else {
@@ -463,6 +444,7 @@ pub(super) fn dispatch_send_prompt_inner(
     };
     // Capture app-level fields before the mut-borrow on `agent`.
     let coding_data_sharing_opt_out_from_app = app.coding_data_retention_opt_out;
+    let coding_data_sharing_lock_from_app = app.coding_data_sharing_lock();
     let show_tips_from_app = app.show_tips;
     let auto_update_from_app = app.auto_update;
     let respect_manual_folds_from_app = app.appearance.scrollback.scroll.respect_manual_folds;
@@ -472,6 +454,7 @@ pub(super) fn dispatch_send_prompt_inner(
     // shown after the agent borrow ends so we can re-enter via the tip helper.
     let mut tip_send_now_after_queue = false;
     let voice_stt_language_from_app = app.voice_config.language.clone();
+    let scheduler_background_loops_seed = app.scheduler_background_loops_seed;
     let login_method_id_from_app = app.login_method_id.as_ref().map(|id| id.0.to_string());
     let Some(agent) = app.agents.get_mut(&id) else {
         return vec![];
@@ -545,6 +528,7 @@ pub(super) fn dispatch_send_prompt_inner(
                 bundle_state: &app.bundle_state,
                 screen_mode: app.screen_mode,
                 billing_surface_visible: app.usage_visible,
+                usage_command_visible: !app.has_external_auth_provider,
                 // PAGER-owned snapshot for slash commands.
                 pager_state: crate::settings::PagerLocalSnapshot {
                     multiline_mode: agent.multiline_mode,
@@ -559,6 +543,7 @@ pub(super) fn dispatch_send_prompt_inner(
                         .map(|(id, info)| (info.name.clone(), id.clone()))
                         .collect(),
                     coding_data_sharing_opt_out: coding_data_sharing_opt_out_from_app,
+                    coding_data_sharing_lock: coding_data_sharing_lock_from_app,
                     // Prefer optimistic pending over confirmed active.
                     plan_mode_active: agent.plan_mode_pending.unwrap_or(agent.plan_mode_active),
                     show_tips: show_tips_from_app,
@@ -569,6 +554,11 @@ pub(super) fn dispatch_send_prompt_inner(
                     auto_mode_gate: auto_mode_gate_from_app,
                     ask_user_question_timeout_enabled: ask_user_question_timeout_enabled_from_app,
                     voice_stt_language: voice_stt_language_from_app,
+                    // This session's own value (what its fires will actually
+                    // do), seed only until the session response lands.
+                    scheduler_background_loops: agent
+                        .scheduler_background_loops
+                        .unwrap_or(scheduler_background_loops_seed),
                 },
             };
 
@@ -595,15 +585,15 @@ pub(super) fn dispatch_send_prompt_inner(
                     });
                 }
                 if let Some(command) = command {
-                    if ctx.screen_mode.is_minimal() && !command.available_in_minimal() {
-                        // Central minimal gate: commands that drive the deleted
-                        // fullscreen pane / dashboard (/find, /dashboard, …)
-                        // have nothing to act on in scrollback-native mode.
-                        // Surface a friendly system block instead of running them.
-                        CommandResult::Message(format!(
-                            "/{} is not available in minimal mode",
-                            invocation.token
-                        ))
+                    // Central screen-mode gate. Such a command is already
+                    // filtered out of every completion surface, but it stays
+                    // resolvable so a fully-typed invocation earns a hint that
+                    // names the way out instead of leaking to the model.
+                    if let Some(refusal) = command
+                        .mode_support()
+                        .refusal(invocation.token, ctx.screen_mode)
+                    {
+                        CommandResult::Message(refusal)
                     } else {
                         agent
                             .prompt
@@ -733,9 +723,6 @@ pub(super) fn dispatch_send_prompt_inner(
             drain_prompt_state_to_last_queued(agent);
             agent.prompt.set_text("");
         }
-        // Every non-enqueue arm returned above. Queued slash work bypasses
-        // the picker, so create the deferred session or it never drains.
-        effects = skip_picker_and_create_session(app, id);
     } else if !literal && matches!(trimmed, "exit" | "quit" | ":q" | ":q!" | ":wq" | ":wq!") {
         if consume_input {
             agent.prompt.set_text("");
@@ -841,7 +828,6 @@ pub(super) fn dispatch_send_prompt_inner(
 
             if parked_sendable_wait && !hold_behind_existing_queue {
                 agent.arm_send_now_expectation(prompt_id.clone());
-                agent.suppress_parked_marker_on_interject();
             }
 
             if consume_input {
@@ -962,14 +948,6 @@ pub(super) fn dispatch_send_bash_command(app: &mut AppView, command: String) -> 
     };
     // Submitting a bash command retires any edit-contextual ephemeral tip.
     agent.ephemeral_tip.clear_on_submit();
-    if agent.session.session_id.is_none() {
-        let effects = skip_picker_and_create_session(app, id);
-        if let Some(agent) = app.agents.get_mut(&id) {
-            agent.session.enqueue_bash_command(command);
-            agent.prompt.set_text("");
-        }
-        return effects;
-    }
 
     // Store in prompt history with `! ` prefix for restore semantics.
     let history_key = format!("! {}", command.trim());
@@ -1602,10 +1580,23 @@ pub(super) fn handle_compact_complete(
     result: Result<(), String>,
 ) -> Vec<Effect> {
     if let Some(agent) = app.agents.get_mut(&agent_id) {
-        // Defensive: only process if we're still in CommandRunning state.
-        // This guards against state machine bugs or future cancellation support.
-        if !matches!(agent.session.state, AgentState::CommandRunning { .. }) {
-            tracing::debug!("Ignoring CompactComplete (not in CommandRunning state)");
+        // Defensive: only process if we're still in a compact command state.
+        let was_cancelling = matches!(
+            agent.session.state,
+            AgentState::CommandCancelling {
+                command: AgentCommand::Compact,
+            }
+        );
+        if !matches!(
+            agent.session.state,
+            AgentState::CommandRunning {
+                command: AgentCommand::Compact,
+                ..
+            } | AgentState::CommandCancelling {
+                command: AgentCommand::Compact,
+            }
+        ) {
+            tracing::debug!("Ignoring CompactComplete (not in compact command state)");
             return vec![];
         }
 
@@ -1618,6 +1609,11 @@ pub(super) fn handle_compact_complete(
                     SessionEvent::CompactCompleted {
                         elapsed: elapsed.unwrap_or_default(),
                     },
+                ));
+            }
+            Err(err) if was_cancelling || err.contains("compact cancelled") => {
+                agent.scrollback.push_block(RenderBlock::session_event(
+                    SessionEvent::CompactionCancelled,
                 ));
             }
             Err(err) => {

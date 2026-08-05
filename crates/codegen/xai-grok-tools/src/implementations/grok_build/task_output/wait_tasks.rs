@@ -10,7 +10,7 @@
 use crate::DEFAULT_TOOL_OUTPUT_BYTES;
 use crate::implementations::grok_build::task::backend::SubagentBackendResource;
 use crate::implementations::grok_build::task_output::{
-    MAX_MULTI_WAIT_IDS, TaskOutputTool, resolve_tasks, wait_any_event_driven,
+    MAX_MULTI_WAIT_IDS, TaskOutputTool, WaitHint, resolve_tasks, wait_any_event_driven,
 };
 use crate::types::requirements::{Expr, ToolRequirement};
 use crate::types::resources::{Terminal, TruncationCfg};
@@ -33,10 +33,10 @@ impl crate::types::tool_metadata::ToolMetadata for WaitTasksTool {
     fn description_template(&self) -> &str {
         // Canonical wording lives in the shared builder; `versioned_definition`
         // renders it context-aware from the finalized toolset. This static
-        // fallback mirrors the default grok-build toolset.
+        // fallback uses canonical tool/param names.
         static DESC: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
             xai_tool_types::build_wait_tasks_description(&xai_tool_types::WaitTasksToolNaming {
-                background_retrieval_tool: "get_command_or_subagent_output",
+                background_retrieval_tool: "get_task_output",
                 bash_background_param: Some("is_background"),
                 subagent_background_param: Some("run_in_background"),
             })
@@ -114,7 +114,7 @@ impl xai_tool_runtime::Tool for WaitTasksTool {
     ) -> xai_tool_types::ToolDescription {
         xai_tool_types::ToolDescription::new(
             "wait_tasks",
-            crate::types::tool_metadata::ToolMetadata::description_template(self),
+            crate::types::tool_metadata::ToolMetadata::sanitized_description_template(self),
         )
     }
 
@@ -171,6 +171,10 @@ impl xai_tool_runtime::Tool for WaitTasksTool {
         // wait_any: keep legacy event-driven path (not exposed on get_task_output).
         let goal_active =
             crate::implementations::grok_build::task_output::goal_cap_applies(&resources).await;
+        let requested = input
+            .timeout_ms
+            .map(std::time::Duration::from_millis)
+            .unwrap_or(super::DEFAULT_WAIT_TIMEOUT);
         let (timeout, goal_capped) =
             crate::implementations::grok_build::task_output::goal_capped_wait_timeout(
                 input.timeout_ms,
@@ -203,6 +207,7 @@ impl xai_tool_runtime::Tool for WaitTasksTool {
             &backend,
             &read_file_name,
             max_output_bytes,
+            WaitHint::NotRequested,
         )
         .await;
 
@@ -211,20 +216,22 @@ impl xai_tool_runtime::Tool for WaitTasksTool {
 
         let results = if has_pending {
             let deadline = tokio::time::Instant::now() + timeout;
-            wait_any_event_driven(
+            let wait_hint = wait_any_event_driven(
                 &terminal,
                 &backend,
                 &initial.pending_bash_ids,
                 &initial.pending_subagent_ids,
                 deadline,
             )
-            .await;
+            .await
+            .hint(requested, timeout);
             resolve_tasks(
                 &input.task_ids,
                 &terminal,
                 &backend,
                 &read_file_name,
                 max_output_bytes,
+                wait_hint,
             )
             .await
             .results
@@ -234,7 +241,7 @@ impl xai_tool_runtime::Tool for WaitTasksTool {
 
         let completed_count = results
             .iter()
-            .filter(|r| r.status == "completed" || r.status == "failed" || r.status == "cancelled")
+            .filter(|r| super::is_terminal_status(&r.status))
             .count();
         let total = results.len();
         let mut summary = format!("{completed_count}/{total} tasks completed (wait_any)");

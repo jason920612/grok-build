@@ -20,7 +20,7 @@ use crate::types::TaskSnapshot;
 use crate::types::output::ToolOutput;
 use crate::types::resources::{SharedResources, State, Terminal};
 use crate::types::tool::{Reminder, ToolKind};
-use crate::util::truncate::{PREVIEW_SIZE, truncate_with_preview};
+use crate::util::truncate::{PREVIEW_SIZE, PartialOutput, truncate_with_preview};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use xai_tool_types::KillTaskOutput;
@@ -151,7 +151,7 @@ pub fn format_bash_completion(
     render_completion_output_delivery(
         &mut msg,
         &task.task_id,
-        &task.output,
+        task.output_view(),
         task_output_name,
         disk_pointer_footer.as_deref(),
     );
@@ -255,11 +255,11 @@ fn split_wrapped_monitor_event(event_text: &str) -> Option<(&str, &str)> {
 /// Buffered `event_text` arrives pre-wrapped (`wrap_monitor_event`); it is
 /// unwrapped via [`split_wrapped_monitor_event`] with verbatim fallback.
 pub fn format_monitor_events(
-    events: &[crate::implementations::grok_build::task::types::MonitorEventNotification],
+    events: &[crate::implementations::grok_build::monitor::types::MonitorEventNotification],
     task_output_name: Option<&str>,
 ) -> Option<String> {
     use std::fmt::Write as _;
-    let tool_hint = task_output_name.unwrap_or("get_command_or_subagent_output");
+    let tool_hint = task_output_name.unwrap_or("get_task_output");
     match events {
         [] => None,
         [event] => {
@@ -278,7 +278,8 @@ pub fn format_monitor_events(
             ))
         }
         _ => {
-            type Event = crate::implementations::grok_build::task::types::MonitorEventNotification;
+            type Event =
+                crate::implementations::grok_build::monitor::types::MonitorEventNotification;
             let mut groups: Vec<(&str, Vec<&Event>)> = Vec::new();
             for event in events {
                 match groups.iter_mut().find(|(id, _)| *id == event.task_id) {
@@ -356,7 +357,7 @@ pub(crate) fn task_owned_by_session(task: &TaskSnapshot, my_owner: Option<&str>)
 pub fn render_completion_output_delivery(
     buf: &mut String,
     subagent_id: &str,
-    output: &str,
+    output: PartialOutput<'_>,
     task_output_name: Option<&str>,
     disk_pointer_footer: Option<&str>,
 ) {
@@ -365,10 +366,12 @@ pub fn render_completion_output_delivery(
     // but lands inside a harness-authored, sealed reminder frame. Strip
     // reserved sentinel code points so it cannot smuggle or close a seal,
     // and defang forged trusted markers so it cannot speak in the
-    // harness's voice from inside the sealed block.
-    let cleaned =
-        crate::antiinjection::sanitize_untrusted(&crate::sentinel::strip_reserved(output).0).0;
-    let output = cleaned.as_str();
+    // harness's voice from inside the sealed block. Applied where the text
+    // is written rather than up front, so truncation still sees the real
+    // byte counts.
+    let clean = |s: &str| -> String {
+        crate::antiinjection::sanitize_untrusted(&crate::sentinel::strip_reserved(s).0).0
+    };
     match task_output_name {
         Some(name) => {
             let _ = write!(buf, "Use {name}(\"{subagent_id}\") to see the full output.");
@@ -384,7 +387,7 @@ pub fn render_completion_output_delivery(
                 let _ = write!(buf, "response:\n{output}");
             }
             None => {
-                let _ = write!(buf, "response:\n{output}");
+                let _ = write!(buf, "response:\n{}", output.text());
             }
         },
     }
@@ -409,6 +412,10 @@ pub async fn resolve_read_tool_name(bridge: &ToolBridge) -> Option<String> {
 /// in the current agent's toolset. When `None`, the subagent's full
 /// `output` is inlined verbatim -- this notification is the only place
 /// the model will see it (no disk-backed output file exists for subagents).
+///
+/// KEEP IN SYNC: the exact wording of this message is a compatibility
+/// surface — downstream mirrors reproduce it verbatim (grep for
+/// `format_subagent_completion_reminder`). Update them when changing it.
 pub fn format_subagent_completion(
     c: &SubagentCompletionSummary,
     task_output_name: Option<&str>,
@@ -433,7 +440,13 @@ pub fn format_subagent_completion(
         Some(_) => "\n",
         None => "\n\n",
     });
-    render_completion_output_delivery(&mut out, &c.subagent_id, &c.output, task_output_name, None);
+    render_completion_output_delivery(
+        &mut out,
+        &c.subagent_id,
+        PartialOutput::whole(&c.output),
+        task_output_name,
+        None,
+    );
     out
 }
 /// Format buffered between-turn subagent completions into a system-reminder
@@ -466,7 +479,7 @@ pub fn format_between_turn_completions(
         render_completion_output_delivery(
             &mut buf,
             &c.subagent_id,
-            &c.output,
+            PartialOutput::whole(&c.output),
             task_output_name,
             None,
         );
@@ -651,14 +664,13 @@ impl Reminder for TaskCompletionReminder {
             .chain(&reserved_ids)
             .cloned()
             .collect::<Vec<_>>();
-        let (terminal, event_sender, session_id) = {
+        let (terminal, event_sender, parent_session_id) = {
             let res = resources.lock().await;
             (
                 res.get::<Terminal>().map(|t| t.0.clone()),
                 res.get::<SubagentEventSender>().cloned(),
-                res.get::<crate::implementations::grok_build::task::types::SessionIdResource>()
-                    .map(|s| s.0.clone())
-                    .unwrap_or_default(),
+                res.get::<crate::types::resources::OwnerSessionId>()
+                    .map(|owner| owner.0.clone()),
             )
         };
         let mut reminders = Vec::new();
@@ -741,7 +753,7 @@ impl Reminder for TaskCompletionReminder {
             if sender
                 .0
                 .send(SubagentEvent::Completions(SubagentCompletionsRequest {
-                    session_id,
+                    parent_session_id,
                     suppress_ids,
                     respond_to: tx,
                 }))
@@ -810,6 +822,9 @@ mod tests {
             block_waited: false,
             explicitly_killed: false,
             owner_session_id: None,
+            description: None,
+            is_backgrounded: false,
+            output_total_bytes: 0,
         };
         let msg = format_bash_completion(&task, Some("get_command_or_subagent_output"), None);
         assert!(msg.contains("abc-123"));
@@ -836,6 +851,9 @@ mod tests {
             block_waited: false,
             explicitly_killed: false,
             owner_session_id: None,
+            description: None,
+            is_backgrounded: false,
+            output_total_bytes: 0,
         };
         let msg = format_monitor_completion(&task, Some("get_command_or_subagent_output"));
         assert!(
@@ -868,6 +886,9 @@ mod tests {
             block_waited: false,
             explicitly_killed: false,
             owner_session_id: None,
+            description: None,
+            is_backgrounded: false,
+            output_total_bytes: 0,
         };
         let msg = format_monitor_completion(&task, None);
         assert!(
@@ -895,6 +916,9 @@ mod tests {
             block_waited: false,
             explicitly_killed: false,
             owner_session_id: None,
+            description: None,
+            is_backgrounded: false,
+            output_total_bytes: 0,
         };
         let msg = format_bash_completion(&task, Some("get_command_or_subagent_output"), None);
         assert!(msg.contains("cargo test"));
@@ -919,6 +943,9 @@ mod tests {
             block_waited: false,
             explicitly_killed: false,
             owner_session_id: None,
+            description: None,
+            is_backgrounded: false,
+            output_total_bytes: 0,
         };
         let msg = format_bash_completion(&task, Some("get_command_or_subagent_output"), None);
         assert!(msg.contains("exit code: unknown"));
@@ -946,6 +973,9 @@ mod tests {
             block_waited: false,
             explicitly_killed: false,
             owner_session_id: None,
+            description: None,
+            is_backgrounded: false,
+            output_total_bytes: 0,
         };
         let msg = format_bash_completion(&task, Some("get_command_or_subagent_output"), None);
         assert!(
@@ -984,6 +1014,9 @@ mod tests {
             block_waited: false,
             explicitly_killed: false,
             owner_session_id: None,
+            description: None,
+            is_backgrounded: false,
+            output_total_bytes: 0,
         };
         let msg = format_bash_completion(&task, Some("get_command_or_subagent_output"), None);
         assert!(
@@ -1021,6 +1054,9 @@ mod tests {
             block_waited: false,
             explicitly_killed: false,
             owner_session_id: None,
+            description: None,
+            is_backgrounded: false,
+            output_total_bytes: 0,
         };
         let msg = format_bash_completion(&task, Some("get_command_or_subagent_output"), None);
         assert!(msg.contains("exit code: 0"));
@@ -1181,7 +1217,35 @@ mod tests {
             block_waited: false,
             explicitly_killed: false,
             owner_session_id: None,
+            description: None,
+            is_backgrounded: false,
+            output_total_bytes: 0,
         }
+    }
+    /// A log that cannot be read produces an empty snapshot with a
+    /// non-zero total. The completion must still say how big the output
+    /// is and where to read it.
+    #[test]
+    fn bash_completion_for_an_unreadable_log_still_points_at_the_file() {
+        let mut task = make_completed("bg-unreadable");
+        task.output = String::new();
+        task.truncated = true;
+        task.output_total_bytes = 123_456;
+        task.output_file = std::path::PathBuf::from("/tmp/bg-unreadable.log");
+        let msg = format_bash_completion(&task, None, Some("read_file"));
+        assert!(msg.contains("123456 bytes total"), "{msg}");
+        assert!(msg.contains("/tmp/bg-unreadable.log"), "{msg}");
+    }
+    /// The snapshot holds part of a large log. The footer the model reads must
+    /// state the task's real size, not the size of the part on hand.
+    #[test]
+    fn bash_completion_footer_states_the_real_log_size() {
+        let mut task = make_completed("bg-large");
+        task.output = "x".repeat(20_000);
+        task.output_total_bytes = 5_000_000;
+        task.output_file = std::path::PathBuf::from("/tmp/bg-large.log");
+        let msg = format_bash_completion(&task, None, Some("read_file"));
+        assert!(msg.contains("5000000 bytes total"), "{msg}");
     }
     fn make_running(id: &str) -> TaskSnapshot {
         TaskSnapshot {
@@ -1201,6 +1265,9 @@ mod tests {
             block_waited: false,
             explicitly_killed: false,
             owner_session_id: None,
+            description: None,
+            is_backgrounded: false,
+            output_total_bytes: 0,
         }
     }
     fn make_bg_started(id: &str) -> crate::types::output::BackgroundTaskStarted {
@@ -1446,7 +1513,6 @@ mod tests {
     fn make_subagent_completion(id: &str, success: bool) -> SubagentCompletionSummary {
         SubagentCompletionSummary {
             subagent_id: id.into(),
-            owner_session_id: String::new(),
             subagent_type: "general-purpose".into(),
             description: "test task".into(),
             success,
@@ -1811,7 +1877,7 @@ mod tests {
     /// reintroduced.
     #[tokio::test]
     async fn reminder_pipeline_ignores_monitor_event_buffer() {
-        use crate::implementations::grok_build::task::types::{
+        use crate::implementations::grok_build::monitor::types::{
             MonitorEventBuffer, MonitorEventNotification,
         };
         use crate::types::resources::Resources;
@@ -1845,7 +1911,7 @@ mod tests {
     /// own + owner-less legacy events; foreign events stay buffered.
     #[test]
     fn drain_owned_partitions_by_session_owner() {
-        use crate::implementations::grok_build::task::types::{
+        use crate::implementations::grok_build::monitor::types::{
             MonitorEventBuffer, MonitorEventNotification, drain_owned,
         };
         let shared_buffer = MonitorEventBuffer::default();
@@ -1882,7 +1948,7 @@ mod tests {
     /// empty => `None`.
     #[test]
     fn format_monitor_events_single_vs_batched() {
-        use crate::implementations::grok_build::task::types::MonitorEventNotification;
+        use crate::implementations::grok_build::monitor::types::MonitorEventNotification;
         let event = |task: &str, desc: &str, text: &str| MonitorEventNotification {
             task_id: task.to_string(),
             event_text: format!(
@@ -1900,7 +1966,7 @@ mod tests {
             single, "<monitor-event task_id=\"task-0\">\n[alpha] line 0\n</monitor-event>",
             "single event must use the lean monitor-event form"
         );
-        let bare = crate::implementations::grok_build::task::types::MonitorEventNotification {
+        let bare = crate::implementations::grok_build::monitor::types::MonitorEventNotification {
             task_id: "task-9".into(),
             event_text: "bare text, no wrapper".into(),
             owner_session_id: None,
@@ -1923,7 +1989,7 @@ mod tests {
         assert!(
             batched.starts_with(
                 "3 monitor events from 2 monitors \
-                 (use get_command_or_subagent_output to identify each monitor):"
+                 (use get_task_output to identify each monitor):"
             ),
             "batch must lead with event + monitor counts and default tool hint: {batched}"
         );
@@ -1988,7 +2054,7 @@ mod tests {
     /// End-to-end multibyte safety through the formatter (single + batch).
     #[test]
     fn format_monitor_events_handles_multibyte_content() {
-        use crate::implementations::grok_build::task::types::MonitorEventNotification;
+        use crate::implementations::grok_build::monitor::types::MonitorEventNotification;
         let event = |task: &str, desc: &str, text: &str| MonitorEventNotification {
             task_id: task.to_string(),
             event_text: format!(

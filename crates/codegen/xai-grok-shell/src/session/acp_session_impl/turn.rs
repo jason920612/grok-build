@@ -1,6 +1,8 @@
 //! Turn-execution concern for `SessionActor` (`handle_prompt`, turn-end,
 //! sampling loop).
 use super::*;
+use crate::util::dual_clock::DualClock;
+use xai_grok_tools::implementations::grok_build::LoopFireMode;
 /// Synthetic tool the model calls to return its schema-constrained final answer
 /// on backends that can't constrain output natively (Messages API). Intercepted
 /// in the loop, never executed as a real tool.
@@ -112,7 +114,7 @@ impl TurnSpanTotals {
 /// `updates.jsonl`.
 ///
 /// Every turn consumes a `prompt_index`, and rewind / fork truncation
-/// (`replay_to_prompt`, `updates_truncate_for_prompt`) recover turn
+/// (`replay_to_prompt`, `truncate_for_prompt_by`) recover turn
 /// boundaries by counting persisted `UserMessageChunk` runs — so every mode
 /// persists the echo. Turns whose content must not render as a user prompt
 /// (notification drain) are hidden by the *pager* via the
@@ -324,13 +326,7 @@ impl SessionActor {
                 .handle_direct_bash_command(prompt_id, bash_command, &prompt_blocks)
                 .await;
         }
-        let slash_skills = self
-            .agent
-            .borrow()
-            .tool_bridge()
-            .clone()
-            .slash_skills()
-            .await;
+        let slash_skills = self.slash_skills_for_resolve().await;
         let skill_rewrite = if crate::session::is_cursor_user_template(
             &self.agent.borrow().definition().user_message_template,
         ) {
@@ -347,12 +343,18 @@ impl SessionActor {
             }
             acc
         });
+        let loop_fire_mode = if self.rebuild_spec.scheduler_background_loops {
+            LoopFireMode::Detached
+        } else {
+            LoopFireMode::InSession
+        };
         let prompt_blocks = match slash_commands::resolve(
             prompt_blocks,
             &slash_skills,
             availability,
             skill_rewrite,
             &named_workflows,
+            loop_fire_mode,
         ) {
             Ok(blocks) => blocks,
             Err(SlashCommandOutcome::Builtin(action)) => {
@@ -432,6 +434,7 @@ impl SessionActor {
                         xai_grok_telemetry::events::SkillDispatched {
                             skill_name: sk.name.clone(),
                             plugin_source: sk.plugin_name.clone(),
+                            trigger: xai_grok_telemetry::events::SkillTrigger::SlashCommand,
                         },
                     );
                     let skill_source = if sk.plugin_name.is_some() {
@@ -843,6 +846,7 @@ impl SessionActor {
         .await;
         let turn_scope_guard =
             TurnSubagentScopeGuard::new(self.current_prompt_id.clone(), prompt_id.to_string());
+        self.open_subagent_spawn_admission();
         let turn_model_id = self.current_model_id().await;
         let doom_event_model = turn_model_id.clone();
         let turn_timer = std::time::Instant::now();
@@ -973,6 +977,34 @@ impl SessionActor {
                         tool_call_count: turn_tool_count,
                         model_id: turn_model_id,
                         cancellation_category: None,
+                        error_category: None,
+                    },
+                );
+            }
+            Ok(TurnOutcome::StationarityEnded { .. }) => {
+                self.emit_turn_ended(
+                    crate::session::events::TurnOutcomeLabel::Completed,
+                    None,
+                    None,
+                );
+                self.send_after_turn_event(xai_tool_protocol::turn_hook::AfterTurnPayload {
+                    turn_number: current_prompt_index as u64,
+                    outcome: xai_tool_protocol::turn_hook::TurnHookOutcome::Completed,
+                    duration_ms: turn_duration_ms,
+                    tool_call_count: turn_tool_count,
+                    model_id: turn_model_id.clone(),
+                    written_repo_paths: Vec::new(),
+                    cancellation_category: Some("action_stationarity".to_string()),
+                    cancellation_context: None,
+                })
+                .await;
+                xai_grok_telemetry::session_ctx::log_event(
+                    xai_grok_telemetry::events::TurnCompleted {
+                        outcome: xai_grok_telemetry::events::Outcome::Completed,
+                        duration_ms: turn_duration_ms,
+                        tool_call_count: turn_tool_count,
+                        model_id: turn_model_id,
+                        cancellation_category: Some("action_stationarity".to_string()),
                         error_category: None,
                     },
                 );
@@ -1108,7 +1140,7 @@ impl SessionActor {
             );
         }
         match &result {
-            Ok(TurnOutcome::Completed { .. }) => {
+            Ok(TurnOutcome::Completed { .. }) | Ok(TurnOutcome::StationarityEnded { .. }) => {
                 for contributor in self.extension_registry.turn_lifecycle_contributors() {
                     contributor
                         .on_turn_done(&xai_agent_lifecycle::TurnDoneInput)
@@ -1135,7 +1167,7 @@ impl SessionActor {
             result,
             Ok(TurnOutcome::Cancelled { .. }) | Ok(TurnOutcome::MaxTurnsReached { .. })
         ) {
-            self.cancel_running_turn_subagents();
+            self.cancel_running_turn_subagents(prompt_id);
         }
         self.flush_to_disk().await;
         self.file_state_tracker
@@ -1174,6 +1206,12 @@ impl SessionActor {
                         *snapshot,
                         PromptCompletionKind::Completed,
                         structured_output,
+                    ),
+                    TurnOutcome::StationarityEnded { snapshot, .. } => (
+                        acp::StopReason::EndTurn,
+                        *snapshot,
+                        PromptCompletionKind::StationarityEnded,
+                        None,
                     ),
                     TurnOutcome::Cancelled { category, context } => {
                         let cancellation_ctx = context.and_then(|v| serde_json::from_value(v).ok());
@@ -1358,6 +1396,7 @@ impl SessionActor {
         if tx
             .send(SubagentEvent::MarkUsageNotApplied(
                 SubagentMarkUsageNotAppliedRequest {
+                    parent_session_id: self.session_id_string(),
                     prompt_id: pid,
                     respond_to,
                 },
@@ -1380,7 +1419,7 @@ impl SessionActor {
         let Some(buffer) = &self.tool_context.monitor_event_buffer else {
             return;
         };
-        let mine = xai_grok_tools::implementations::grok_build::task::types::drain_owned(
+        let mine = xai_grok_tools::implementations::grok_build::monitor::types::drain_owned(
             buffer,
             Some(self.session_info.id.0.as_ref()),
         );
@@ -1407,11 +1446,12 @@ impl SessionActor {
     /// goal is `Active` (`goal_active_now == true`):
     ///
     /// 1. **Success.** Reset `goal_continuation_streak` to 0, then call
-    ///    `maybe_queue_goal_continuation`. That helper verifies any
-    ///    pending completion via its turn-end drain, queues the
-    ///    continuation reminder if the goal is still `Active`, and runs
-    ///    the stop-detector to select the nudge flavor (generic vs.
-    ///    bail-specific) and emit `Event::GoalPrematureStopDetected`.
+    ///    `maybe_queue_goal_continuation` unless `suppress_goal_continuation`
+    ///    (stationarity silent EndTurn). That helper verifies any pending
+    ///    completion via its turn-end drain, queues the continuation reminder
+    ///    if the goal is still `Active`, and runs the stop-detector to select
+    ///    the nudge flavor (generic vs. bail-specific) and emit
+    ///    `Event::GoalPrematureStopDetected`.
     /// 2. **Non-success.** Increment `goal_continuation_streak`. At
     ///    [`GOAL_CONTINUATION_BACKOFF_THRESHOLD`] consecutive hits,
     ///    reset the streak and auto-pause with
@@ -1425,7 +1465,11 @@ impl SessionActor {
     /// before this method and already transitioned the goal out of
     /// Active), both branches are skipped: neither streak moves and the
     /// existing pause cause is preserved.
-    pub(crate) async fn handle_turn_end(&self, turn_succeeded: bool) {
+    pub(crate) async fn handle_turn_end(
+        &self,
+        turn_succeeded: bool,
+        suppress_goal_continuation: bool,
+    ) {
         let goal_active_now = laziness_injection_active(
             self.goal_harness_enabled(),
             self.goal_tracker.lock().status(),
@@ -1433,7 +1477,9 @@ impl SessionActor {
         if turn_succeeded && goal_active_now {
             self.goal_continuation_streak
                 .store(0, std::sync::atomic::Ordering::Relaxed);
-            self.maybe_queue_goal_continuation().await;
+            if !suppress_goal_continuation {
+                self.maybe_queue_goal_continuation().await;
+            }
             return;
         }
         if !turn_succeeded && goal_active_now {
@@ -1525,7 +1571,10 @@ impl SessionActor {
                 json_schema.clone(),
             )
             .await;
-        if matches!(result, Ok(TurnOutcome::MaxTurnsReached { .. })) {
+        if matches!(
+            result,
+            Ok(TurnOutcome::MaxTurnsReached { .. }) | Ok(TurnOutcome::StationarityEnded { .. })
+        ) {
             return result;
         }
         if let Ok(TurnOutcome::Completed {
@@ -1589,7 +1638,10 @@ impl SessionActor {
                     None,
                 )
                 .await;
-            if matches!(result, Ok(TurnOutcome::MaxTurnsReached { .. })) {
+            if matches!(
+                result,
+                Ok(TurnOutcome::MaxTurnsReached { .. }) | Ok(TurnOutcome::StationarityEnded { .. })
+            ) {
                 return result;
             }
             if let Ok(TurnOutcome::Completed {
@@ -1747,6 +1799,25 @@ impl SessionActor {
             ));
         StructuredOutputStep::Complete(validated)
     }
+    /// Single shell tool call whose parsed command is `true` (via ToolBridge).
+    async fn is_run_true_step(
+        &self,
+        tool_calls: &[xai_grok_sampling_types::conversation::ToolCall],
+    ) -> bool {
+        let [tc] = tool_calls else {
+            return false;
+        };
+        let Ok(args) = serde_json::from_str::<serde_json::Value>(tc.arguments.as_ref()) else {
+            return false;
+        };
+        let Ok(input) = self.tool_bridge_handle().try_parse(&tc.name, args).await else {
+            return false;
+        };
+        match input {
+            ToolInput::Bash(b) => command_is_true(&b.command),
+            _ => false,
+        }
+    }
     /// Shared turn-completion bookkeeping (plan cleanup, signals snapshot +
     /// persistence, BigQuery turn delta, feedback prompt). Runs identically for
     /// the native and StructuredOutput-tool completion paths. Returns the
@@ -1831,6 +1902,7 @@ impl SessionActor {
         json_schema: Option<serde_json::Value>,
     ) -> Result<TurnOutcome, acp::Error> {
         let conv_turn_start = std::time::Instant::now();
+        let conv_turn_clock = DualClock::now();
         self.maybe_refresh_model_metadata_on_resume().await;
         self.maybe_compact_on_model_switch().await?;
         self.chat_state_handle
@@ -1934,14 +2006,16 @@ impl SessionActor {
         loop {
             self.emit_event(crate::session::events::Event::LoopStarted { loop_index });
             loop_index += 1;
-            if identical_tool_calls.run_len >= MAX_CONSECUTIVE_IDENTICAL_TOOL_CALLS {
+            if identical_tool_calls.run_len >= identical_tool_calls.hard_stop_threshold() {
                 let run_len = identical_tool_calls.run_len;
                 let tool_name = identical_tool_calls.tool_name.clone();
+                let true_noop = identical_tool_calls.is_true_noop_run;
                 tracing::warn!(
                     session_id = %self.session_info.id,
                     tool_name = %tool_name,
                     run_len,
-                    "action stationarity: stopping turn after repeated identical tool calls"
+                    true_noop,
+                    "action stationarity: ending turn after repeated identical tool calls"
                 );
                 xai_grok_telemetry::unified_log::warn(
                     "shell.turn.action_stationarity_stop",
@@ -1950,30 +2024,58 @@ impl SessionActor {
                         "loop_index": loop_index,
                         "tool_name": tool_name,
                         "run_len": run_len,
+                        "true_noop": true_noop,
                     })),
                 );
-                let notice = format!(
-                    "Stopped: the agent ran the same command (`{tool_name}`) {run_len} times in \
-                     a row with no change in the result. If it's waiting on a long-running job, \
-                     use a background task or the `monitor` tool (or a single `sleep` then check) \
-                     instead of polling; otherwise send a new instruction."
+                xai_grok_telemetry::session_ctx::log_event(
+                    xai_grok_telemetry::events::ActionStationarityStop {
+                        true_noop,
+                        run_len,
+                        tool_name: tool_name.clone(),
+                    },
                 );
-                self.send_update(
-                    acp::SessionUpdate::AgentMessageChunk(acp::ContentChunk::new(
-                        acp::ContentBlock::Text(acp::TextContent::new(notice)),
-                    )),
-                    None,
-                )
-                .await;
-                return Ok(TurnOutcome::Cancelled {
-                    category: Some(
-                        crate::session::events::CancellationCategory::ActionStationarity,
-                    ),
-                    context: Some(serde_json::json!({
+                let snapshot = self
+                    .finalize_turn_bookkeeping(
+                        req_id,
+                        conv_turn_start,
+                        &turn_span_totals,
+                        model_fingerprint.clone(),
+                    )
+                    .await;
+                return Ok(TurnOutcome::StationarityEnded {
+                    snapshot: Box::new(snapshot),
+                });
+            }
+            if identical_tool_calls.take_nudge() {
+                let run_len = identical_tool_calls.run_len;
+                let tool_name = identical_tool_calls.tool_name.clone();
+                tracing::warn!(
+                    session_id = %self.session_info.id,
+                    tool_name = %tool_name,
+                    run_len,
+                    "action stationarity: nudging model to break repeated identical tool calls"
+                );
+                xai_grok_telemetry::unified_log::warn(
+                    "shell.turn.action_stationarity_nudge",
+                    Some(self.session_info.id.0.as_ref()),
+                    Some(serde_json::json!({
+                        "loop_index": loop_index,
                         "tool_name": tool_name,
                         "run_len": run_len,
                     })),
-                });
+                );
+                let reminder = self
+                    .tool_bridge_handle()
+                    .render_prompt(
+                        ACTION_STATIONARITY_NUDGE_TEMPLATE,
+                        &serde_json::json!({
+                            "tool_name": tool_name,
+                            "run_len": run_len,
+                        }),
+                    )
+                    .await
+                    .unwrap_or_else(|| ACTION_STATIONARITY_NUDGE_TEMPLATE.to_string());
+                self.push_system_reminder(&reminder);
             }
             self.drain_pending_interjections().await;
             self.flush_pending_skill_reminders().await;
@@ -2107,50 +2209,138 @@ impl SessionActor {
                     return Err(error);
                 }
                 Ok(SamplerTurnOutcome::CompactAndResubmit) => {
-                    auth_retry_schedule.reset();
+                    auth_retry_schedule.reset_on_success();
                     continue;
                 }
-                Ok(SamplerTurnOutcome::RefreshAuthAndResubmit) => {
-                    if let Some((attempt, delay)) = auth_retry_schedule.next_delay() {
-                        let delay_ms = delay.as_millis() as u64;
-                        tracing::warn!(
-                            attempt,
-                            delay_ms,
-                            "auth 401 retry: backing off before resubmit"
-                        );
-                        xai_grok_telemetry::unified_log::warn(
-                            "shell.turn.auth_retry_backoff",
+                Ok(SamplerTurnOutcome::RefreshAuthAndResubmit { credential, store }) => {
+                    if auth_retry_schedule.reset_if_incident_spans_suspend() {
+                        tracing::info!("auth 401 retry: incident spanned a suspend; budget reset");
+                        xai_grok_telemetry::unified_log::info(
+                            "shell.turn.auth_retry_reset_after_suspend",
                             Some(self.session_info.id.0.as_ref()),
-                            Some(serde_json::json!({
-                                "loop_index": loop_index,
-                                "attempt": attempt,
-                                "max_retries": AuthRetrySchedule::MAX_RETRIES,
-                                "delay_ms": delay_ms,
-                            })),
+                            Some(serde_json::json!({ "loop_index": loop_index })),
                         );
-                        self.send_xai_notification(XaiSessionUpdate::RetryState(
-                            crate::extensions::notification::RetryState::Retrying {
-                                attempt,
-                                max_retries: AuthRetrySchedule::MAX_RETRIES,
-                                reason: "Re-authenticated after 401; retrying request".to_string(),
-                            },
-                        ))
-                        .await;
-                        sleep(delay).await;
-                        continue;
                     }
-                    let msg = format!(
-                        "Auth recovery succeeded but inference request was \
-                         still rejected (401) after {} retries",
-                        AuthRetrySchedule::MAX_RETRIES
-                    );
-                    tracing::error!(msg);
-                    return Err(acp::Error::internal_error().data(
-                        crate::sampling::error::error_data_with_status(msg, Some(401)),
-                    ));
+                    match auth_retry_schedule.on_recovered_401(credential) {
+                        AuthRetryDecision::UnchargedResubmit { resubmit } => {
+                            tracing::warn!(
+                                resubmit,
+                                "auth 401 retry: no credential was sent; resubmitting uncharged"
+                            );
+                            xai_grok_telemetry::unified_log::warn(
+                                "shell.turn.auth_resubmit_uncharged",
+                                Some(self.session_info.id.0.as_ref()),
+                                Some(serde_json::json!({
+                                    "loop_index": loop_index,
+                                    "resubmit": resubmit,
+                                    "max_resubmits": AuthRetrySchedule::MAX_UNCHARGED_RESUBMITS,
+                                })),
+                            );
+                            self.send_xai_notification(XaiSessionUpdate::RetryState(
+                                crate::extensions::notification::RetryState::Retrying {
+                                    attempt: resubmit,
+                                    max_retries: AuthRetrySchedule::MAX_UNCHARGED_RESUBMITS,
+                                    reason: "Re-authenticated after 401 (request carried no \
+                                             credential); retrying request"
+                                        .to_string(),
+                                },
+                            ))
+                            .await;
+                            pace_uncharged_resubmit(store, self.auth_manager.as_ref()).await;
+                            continue;
+                        }
+                        AuthRetryDecision::Backoff { attempt, delay } => {
+                            let delay_ms = delay.as_millis() as u64;
+                            tracing::warn!(
+                                attempt,
+                                delay_ms,
+                                "auth 401 retry: backing off before resubmit"
+                            );
+                            xai_grok_telemetry::unified_log::warn(
+                                "shell.turn.auth_retry_backoff",
+                                Some(self.session_info.id.0.as_ref()),
+                                Some(serde_json::json!({
+                                    "loop_index": loop_index,
+                                    "attempt": attempt,
+                                    "max_retries": AuthRetrySchedule::MAX_RETRIES,
+                                    "delay_ms": delay_ms,
+                                })),
+                            );
+                            self.send_xai_notification(XaiSessionUpdate::RetryState(
+                                crate::extensions::notification::RetryState::Retrying {
+                                    attempt,
+                                    max_retries: AuthRetrySchedule::MAX_RETRIES,
+                                    reason: "Re-authenticated after 401; retrying request"
+                                        .to_string(),
+                                },
+                            ))
+                            .await;
+                            sleep(delay).await;
+                            continue;
+                        }
+                        decision @ (AuthRetryDecision::Exhausted
+                        | AuthRetryDecision::RunawayGuard { .. }) => {
+                            let (awake, wall, suspended) = conv_turn_clock.elapsed_split();
+                            let duration_note = if suspended >= std::time::Duration::from_secs(1) {
+                                format!(
+                                    " Turn ran {} wall-clock, {} of it suspended.",
+                                    human_duration(wall),
+                                    human_duration(suspended)
+                                )
+                            } else {
+                                format!(" Turn ran {} wall-clock.", human_duration(wall))
+                            };
+                            let (rejections, authenticated) = auth_retry_schedule.incident_counts();
+                            let uncharged = auth_retry_schedule.uncharged_rejections();
+                            let msg = match decision {
+                                AuthRetryDecision::RunawayGuard { rejections } => {
+                                    format!(
+                                        "Auth recovery kept succeeding but {rejections} requests \
+                                     were rejected (401) before a credential could be sent, \
+                                     with no successful response in between; stopping as a \
+                                     runaway guard.{duration_note}"
+                                    )
+                                }
+                                _ if authenticated == rejections => {
+                                    format!(
+                                        "Auth recovery succeeded but {rejections} authenticated \
+                                     inference requests were still rejected (401); giving up \
+                                     after {} retries.{duration_note}",
+                                        AuthRetrySchedule::MAX_RETRIES
+                                    )
+                                }
+                                _ => {
+                                    format!(
+                                        "Auth retry budget exhausted after {rejections} \
+                                     post-recovery 401s ({authenticated} provably carried a \
+                                     credential).{duration_note}"
+                                    )
+                                }
+                            };
+                            tracing::error!(msg);
+                            xai_grok_telemetry::unified_log::error(
+                                "shell.turn.auth_retry_exhausted",
+                                Some(self.session_info.id.0.as_ref()),
+                                Some(serde_json::json!({
+                                    "loop_index": loop_index,
+                                    "decision": match decision {
+                                        AuthRetryDecision::RunawayGuard { .. } => "runaway_guard",
+                                        _ => "exhausted",
+                                    },
+                                    "rejections": rejections,
+                                    "authenticated": authenticated,
+                                    "uncharged": uncharged,
+                                    "wall_secs": wall.as_secs(),
+                                    "awake_secs": awake.as_secs(),
+                                    "suspended_secs": suspended.as_secs(),
+                                })),
+                            );
+                            return Err(self.fail_turn_auth_budget_exhausted(msg).await);
+                        }
+                    }
                 }
             };
-            auth_retry_schedule.reset();
+            auth_retry_schedule.reset_on_success();
             let model_elapsed_ms = model_timer.elapsed().as_millis() as u64;
             let usage = response.usage.as_ref();
             let prompt_tokens = usage.map(|u| u.prompt_tokens);
@@ -2223,6 +2413,7 @@ impl SessionActor {
                 );
             }
             self.record_response_token_usage(&response, Some(model_duration_ms));
+            let response_completed = self.response_completed_update(&response);
             if let Some(pt) = prompt_timing.take() {
                 let mcp_count = self.mcp_state.lock().await.configs.len() as u32;
                 let mcp_tools = self
@@ -2306,6 +2497,7 @@ impl SessionActor {
                 )
                 .await;
             }
+            self.send_buffered_xai_update(response_completed).await;
             if tool_calls.is_empty() {
                 if !schema_ok
                     && !turn_refused
@@ -2445,35 +2637,14 @@ impl SessionActor {
                 .first()
                 .map(|tc| tc.name.clone())
                 .unwrap_or_default();
-            let identical_run_len = identical_tool_calls.observe(&step_signature, &step_tool_name);
-            if identical_run_len == NUDGE_AFTER_IDENTICAL_TOOL_CALLS {
-                tracing::warn!(
-                    session_id = %self.session_info.id,
-                    tool_name = %step_tool_name,
-                    run_len = identical_run_len,
-                    "action stationarity: nudging model to break repeated identical tool calls"
+            let is_true_noop = self.is_run_true_step(&tool_calls).await;
+            identical_tool_calls.observe(&step_signature, &step_tool_name, is_true_noop);
+            if is_true_noop {
+                xai_grok_telemetry::session_ctx::log_event(
+                    xai_grok_telemetry::events::ShellTrueNoop {
+                        tool_name: step_tool_name.clone(),
+                    },
                 );
-                xai_grok_telemetry::unified_log::warn(
-                    "shell.turn.action_stationarity_nudge",
-                    Some(self.session_info.id.0.as_ref()),
-                    Some(serde_json::json!({
-                        "loop_index": loop_index,
-                        "tool_name": step_tool_name,
-                        "run_len": identical_run_len,
-                    })),
-                );
-                let reminder = self
-                    .tool_bridge_handle()
-                    .render_prompt(
-                        ACTION_STATIONARITY_NUDGE_TEMPLATE,
-                        &serde_json::json!({
-                            "tool_name": step_tool_name,
-                            "run_len": identical_run_len,
-                        }),
-                    )
-                    .await
-                    .unwrap_or_else(|| ACTION_STATIONARITY_NUDGE_TEMPLATE.to_string());
-                self.push_system_reminder(&reminder);
             }
             let tool_call_responses: Vec<ToolCallResponse> = tool_calls
                 .into_iter()
@@ -2554,154 +2725,130 @@ impl SessionActor {
 }
 const MAX_CONSECUTIVE_IDENTICAL_TOOL_CALLS: u32 = 16;
 const NUDGE_AFTER_IDENTICAL_TOOL_CALLS: u32 = 8;
+const MAX_CONSECUTIVE_TRUE_NOOPS: u32 = 4;
 const _: () = assert!(NUDGE_AFTER_IDENTICAL_TOOL_CALLS < MAX_CONSECUTIVE_IDENTICAL_TOOL_CALLS);
+const _: () = assert!(MAX_CONSECUTIVE_TRUE_NOOPS < NUDGE_AFTER_IDENTICAL_TOOL_CALLS);
 const ACTION_STATIONARITY_NUDGE_TEMPLATE: &str = "You have called the same tool \
-     (`${{ tool_name }}`) with the exact same arguments ${{ run_len }} times in a row, \
-     getting the same result each time — you appear to be stuck in a polling loop. Stop \
-     repeating this call. If you are waiting on a long-running job or command, use a \
-     background task${%- if tools.by_kind.monitor %} or the `${{ tools.by_kind.monitor }}` \
-     tool${%- endif %}, or run a single `sleep` and then check once — do not poll in a tight \
-     loop. If you cannot make progress, stop and tell the user what you are waiting for. This \
-     turn will be halted automatically if the identical call keeps repeating.";
+     (`${{ tool_name }}`) with the exact same arguments ${{ run_len }} times in a row — \
+     you appear to be stuck in a polling loop. Stop repeating this call. If you are \
+     waiting on a long-running job or command, use a background task${%- if tools.by_kind.monitor %} \
+     or the `${{ tools.by_kind.monitor }}` tool${%- endif %}, or run a single `sleep` and \
+     then check once — do not poll in a tight loop. If you cannot make progress, stop and \
+     tell the user what you are waiting for. This turn will be halted automatically if the \
+     identical call keeps repeating.";
 fn hash_step_signature(signature: &str) -> u64 {
     use std::hash::{Hash, Hasher};
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     signature.hash(&mut hasher);
     hasher.finish()
 }
+fn command_is_true(cmd: &str) -> bool {
+    cmd.trim().eq_ignore_ascii_case("true")
+}
 #[derive(Default)]
 struct IdenticalToolCallRun {
     last_signature_hash: Option<u64>,
     tool_name: String,
     run_len: u32,
+    is_true_noop_run: bool,
+    nudged: bool,
 }
 impl IdenticalToolCallRun {
-    fn observe(&mut self, signature: &str, tool_name: &str) -> u32 {
-        let hash = hash_step_signature(signature);
+    fn observe(&mut self, signature: &str, tool_name: &str, is_true_noop: bool) -> u32 {
+        let hash = hash_step_signature(if is_true_noop {
+            "\0true_noop"
+        } else {
+            signature
+        });
         if self.last_signature_hash == Some(hash) {
             self.run_len += 1;
         } else {
             self.run_len = 1;
             self.last_signature_hash = Some(hash);
+            self.is_true_noop_run = is_true_noop;
+            self.nudged = false;
         }
         self.tool_name = tool_name.to_string();
         self.run_len
     }
+    /// Once per identical run at/after the nudge threshold. Call only after results are committed.
+    fn take_nudge(&mut self) -> bool {
+        let fire = self.run_len >= NUDGE_AFTER_IDENTICAL_TOOL_CALLS && !self.nudged;
+        self.nudged |= fire;
+        fire
+    }
+    fn hard_stop_threshold(&self) -> u32 {
+        if self.is_true_noop_run {
+            MAX_CONSECUTIVE_TRUE_NOOPS
+        } else {
+            MAX_CONSECUTIVE_IDENTICAL_TOOL_CALLS
+        }
+    }
 }
 #[cfg(test)]
 mod identical_tool_call_run_tests {
-    use super::{IdenticalToolCallRun, MAX_CONSECUTIVE_IDENTICAL_TOOL_CALLS};
+    use super::{
+        IdenticalToolCallRun, MAX_CONSECUTIVE_IDENTICAL_TOOL_CALLS, MAX_CONSECUTIVE_TRUE_NOOPS,
+        NUDGE_AFTER_IDENTICAL_TOOL_CALLS, command_is_true,
+    };
     #[test]
-    fn counts_consecutive_identical_calls() {
+    fn identical_non_true_resets_and_caps_at_16() {
         let mut run = IdenticalToolCallRun::default();
-        let sig = "run_terminal_cmd\u{1f}{\"command\":\"squeue\"}";
-        assert_eq!(run.observe(sig, "run_terminal_cmd"), 1);
-        assert_eq!(run.observe(sig, "run_terminal_cmd"), 2);
-        assert_eq!(run.observe(sig, "run_terminal_cmd"), 3);
-    }
-    #[test]
-    fn a_different_call_resets_the_run() {
-        let mut run = IdenticalToolCallRun::default();
-        run.observe("a", "a");
-        run.observe("a", "a");
-        assert_eq!(run.observe("b", "b"), 1, "a different signature resets");
-        assert_eq!(run.observe("b", "b"), 2);
-        assert_eq!(run.tool_name, "b");
-        assert_eq!(
-            run.observe("a", "a"),
-            1,
-            "not consecutive with the first run"
-        );
-    }
-    #[test]
-    fn run_reaches_the_bound_after_n_identical_calls() {
-        let mut run = IdenticalToolCallRun::default();
+        assert_eq!(run.observe("a", "a", false), 1);
+        assert_eq!(run.observe("a", "a", false), 2);
+        assert_eq!(run.observe("b", "b", false), 1);
         let mut last = 0;
         for _ in 0..MAX_CONSECUTIVE_IDENTICAL_TOOL_CALLS {
-            last = run.observe("same", "same");
+            last = run.observe("same", "same", false);
         }
         assert_eq!(last, MAX_CONSECUTIVE_IDENTICAL_TOOL_CALLS);
+        assert_eq!(
+            run.hard_stop_threshold(),
+            MAX_CONSECUTIVE_IDENTICAL_TOOL_CALLS
+        );
     }
-}
-/// Backoff schedule for resubmits after a *successful* 401 auth recovery
-/// (fresh token minted, request to be re-sent).
-///
-/// Two hard-won invariants, both regressions from the silent-hang incident
-/// where a turn froze 16m40s and then 11.6 days (user-cancelled at 27min):
-///
-/// - **Delays must be 1s/2s/4s.** `tokio_retry::ExponentialBackoff::
-///   from_millis(base)` raises `base` to the attempt number, so the base must
-///   stay small: `from_millis(1000)` yields 1000ⁿ ms = 1s → 16m40s → 11.57
-///   days. `from_millis(2).factor(500)` yields 2ⁿ × 500ms = 1s, 2s, 4s.
-/// - **The schedule is per-incident, not per-turn.** A long turn can span
-///   several hourly gateway token rotations; each rotation is an independent
-///   401→refresh→retry event. Without `reset()` after a successful response,
-///   the third rotation of one turn would land on the last (largest) delay
-///   and the fourth would fail the turn outright.
-struct AuthRetrySchedule {
-    delays: std::iter::Take<ExponentialBackoff>,
-    attempt: u32,
-}
-impl AuthRetrySchedule {
-    /// Consecutive post-recovery 401s tolerated before the turn fails.
-    const MAX_RETRIES: u32 = 3;
-    fn new() -> Self {
-        Self {
-            delays: ExponentialBackoff::from_millis(2)
-                .factor(500)
-                .max_delay(std::time::Duration::from_secs(10))
-                .take(Self::MAX_RETRIES as usize),
-            attempt: 0,
+    #[test]
+    fn true_noops_chain_across_args_and_stop_at_4() {
+        let mut run = IdenticalToolCallRun::default();
+        for i in 1..=4 {
+            assert_eq!(run.observe(&format!("sig{i}"), "bash", true), i);
         }
+        assert!(run.is_true_noop_run);
+        assert_eq!(run.hard_stop_threshold(), MAX_CONSECUTIVE_TRUE_NOOPS);
+        assert_eq!(run.observe("squeue", "bash", false), 1);
+        assert!(!run.is_true_noop_run);
     }
-    /// Next `(attempt_number, delay)` (1-indexed), or `None` once exhausted.
-    fn next_delay(&mut self) -> Option<(u32, std::time::Duration)> {
-        let delay = self.delays.next()?;
-        self.attempt += 1;
-        Some((self.attempt, delay))
-    }
-    /// A successful model response closes the incident: restart the schedule
-    /// so the next token rotation starts back at the shortest delay.
-    fn reset(&mut self) {
-        *self = Self::new();
-    }
-}
-#[cfg(test)]
-mod auth_retry_schedule_tests {
-    use super::AuthRetrySchedule;
-    use std::time::Duration;
-    /// Pins the exact schedule. Guards against the `from_millis(1000)`
-    /// footgun (baseⁿ semantics): that spelling produced sleeps of 1s,
-    /// 16m40s, and 11.57 days, observed in the field as a silent
-    /// ~27-minute hang in `waiting_model` that the user had to cancel.
     #[test]
-    fn schedule_is_one_two_four_seconds_then_exhausted() {
-        let mut schedule = AuthRetrySchedule::new();
-        let steps: Vec<_> = std::iter::from_fn(|| schedule.next_delay()).collect();
-        assert_eq!(
-            steps,
-            vec![
-                (1, Duration::from_secs(1)),
-                (2, Duration::from_secs(2)),
-                (3, Duration::from_secs(4)),
-            ],
-        );
-        assert_eq!(
-            schedule.next_delay(),
-            None,
-            "must exhaust after MAX_RETRIES"
-        );
+    fn command_is_true_trim_and_case() {
+        assert!(command_is_true("true"));
+        assert!(command_is_true(" TRUE "));
+        assert!(!command_is_true("true && echo hi"));
+        assert!(!command_is_true("lisa status"));
     }
-    /// Each successful response must restart the schedule: hourly token
-    /// rotations within one long turn are independent incidents, so they
-    /// must not escalate toward exhaustion (turn failure).
     #[test]
-    fn reset_restarts_delays_and_attempt_numbering() {
-        let mut schedule = AuthRetrySchedule::new();
-        schedule.next_delay();
-        schedule.next_delay();
-        schedule.reset();
-        assert_eq!(schedule.next_delay(), Some((1, Duration::from_secs(1))));
+    fn nudge_latch_fires_once_per_run_after_threshold() {
+        let mut run = IdenticalToolCallRun::default();
+        for i in 1..NUDGE_AFTER_IDENTICAL_TOOL_CALLS {
+            assert_eq!(run.observe("poll", "get_task_output", false), i);
+            assert!(
+                !run.take_nudge(),
+                "must not nudge before threshold; run_len={i}"
+            );
+        }
+        assert_eq!(
+            run.observe("poll", "get_task_output", false),
+            NUDGE_AFTER_IDENTICAL_TOOL_CALLS
+        );
+        assert!(run.take_nudge());
+        assert!(!run.take_nudge());
+        assert_eq!(
+            run.observe("poll", "get_task_output", false),
+            NUDGE_AFTER_IDENTICAL_TOOL_CALLS + 1
+        );
+        assert!(!run.take_nudge());
+        assert_eq!(run.observe("other", "bash", false), 1);
+        assert!(!run.nudged);
+        assert!(!run.take_nudge());
     }
 }
 #[cfg(test)]

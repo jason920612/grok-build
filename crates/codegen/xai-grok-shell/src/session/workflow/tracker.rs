@@ -43,7 +43,7 @@ impl WorkflowRunStatus {
         )
     }
 
-    pub fn is_completion_reportable(self) -> bool {
+    pub(crate) fn is_completion_reportable(self) -> bool {
         self.is_terminal() || self == Self::BudgetLimited
     }
 
@@ -57,6 +57,10 @@ impl WorkflowRunStatus {
                 | Self::Blocked
                 | Self::BudgetLimited
         )
+    }
+
+    pub(crate) fn is_resumable(self) -> bool {
+        self.is_paused() || self == Self::Failed
     }
 
     fn from_pause(kind: PauseKind) -> Self {
@@ -78,7 +82,7 @@ pub struct WorkflowHistoryEntry {
     pub at: String,
 }
 
-pub const WORKFLOW_HISTORY_MAX: usize = 64;
+pub(crate) const WORKFLOW_HISTORY_MAX: usize = 64;
 const WORKFLOW_PAUSE_MESSAGE_MAX_BYTES: usize = 4 * 1024;
 
 fn capped_pause_message(message: impl Into<String>) -> String {
@@ -130,7 +134,7 @@ pub struct WorkflowAgentRow {
     pub duration_ms: u64,
 }
 
-pub const WORKFLOW_AGENT_ROWS_MAX: usize = 256;
+pub(crate) const WORKFLOW_AGENT_ROWS_MAX: usize = 256;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorkflowRunState {
@@ -190,7 +194,7 @@ fn now_rfc3339() -> String {
 }
 
 #[derive(Debug, Default)]
-pub struct WorkflowTracker {
+pub(crate) struct WorkflowTracker {
     runs: Vec<TrackedRun>,
     reported_terminal_run_ids: std::collections::HashSet<String>,
     terminal_at_restore_run_ids: std::collections::HashSet<String>,
@@ -205,7 +209,7 @@ struct TrackedRun {
 }
 
 impl WorkflowTracker {
-    pub fn start_run(
+    pub(crate) fn start_run(
         &mut self,
         run_id: String,
         name: String,
@@ -257,13 +261,13 @@ impl WorkflowTracker {
         state
     }
 
-    pub fn resume_run(
+    pub(crate) fn resume_run(
         &mut self,
         run_id: &str,
         new_agent_budget: Option<u64>,
     ) -> Option<WorkflowRunState> {
         let run = self.run_mut(run_id)?;
-        if !run.state.status.is_paused() {
+        if !run.state.status.is_resumable() {
             return None;
         }
         let candidate_budget = match new_agent_budget {
@@ -296,7 +300,7 @@ impl WorkflowTracker {
         Some(state)
     }
 
-    pub fn set_phase(&mut self, run_id: &str, title: &str) -> Option<WorkflowRunState> {
+    pub(crate) fn set_phase(&mut self, run_id: &str, title: &str) -> Option<WorkflowRunState> {
         let run = self.run_mut(run_id)?;
         if run.state.current_phase.as_deref() != Some(title) {
             run.state.current_phase = Some(title.to_string());
@@ -391,7 +395,7 @@ impl WorkflowTracker {
         Some(run.state.clone())
     }
 
-    pub fn agent_started(&mut self, run_id: &str, mut row: WorkflowAgentRow) -> String {
+    pub(crate) fn agent_started(&mut self, run_id: &str, mut row: WorkflowAgentRow) -> String {
         let Some(run) = self.run_mut(run_id) else {
             return if row.label.is_empty() {
                 "agent".to_string()
@@ -416,7 +420,20 @@ impl WorkflowTracker {
         label
     }
 
-    pub fn agent_finished(
+    /// Point a roster row at a fresh child session id. Contract retries
+    /// spawn a new child session per attempt; the row must follow so live
+    /// progress lookups and transcript clicks resolve to the current child.
+    pub(crate) fn rebind_agent_id(&mut self, run_id: &str, agent_id: &str, new_agent_id: &str) {
+        let Some(run) = self.run_mut(run_id) else {
+            return;
+        };
+        if let Some(row) = run.state.agents.iter_mut().find(|a| a.agent_id == agent_id) {
+            row.agent_id = new_agent_id.to_string();
+            run.state.advance_revision();
+        }
+    }
+
+    pub(crate) fn agent_finished(
         &mut self,
         run_id: &str,
         agent_id: &str,
@@ -435,13 +452,13 @@ impl WorkflowTracker {
         }
     }
 
-    pub fn log_message(&mut self, run_id: &str, message: &str) -> Option<WorkflowRunState> {
+    pub(crate) fn log_message(&mut self, run_id: &str, message: &str) -> Option<WorkflowRunState> {
         let run = self.run_mut(run_id)?;
         run.state.record_event("log", Some(message.to_string()));
         Some(run.state.clone())
     }
 
-    pub fn pause_user(
+    pub(crate) fn pause_user(
         &mut self,
         run_id: &str,
         message: Option<String>,
@@ -458,7 +475,7 @@ impl WorkflowTracker {
         Some(run.state.clone())
     }
 
-    pub fn interrupt(
+    pub(crate) fn interrupt(
         &mut self,
         run_id: &str,
         message: impl Into<String>,
@@ -474,7 +491,7 @@ impl WorkflowTracker {
         Some(run.state.clone())
     }
 
-    pub fn apply_outcome(
+    pub(crate) fn apply_outcome(
         &mut self,
         run_id: &str,
         outcome: &WorkflowOutcome,
@@ -535,7 +552,7 @@ impl WorkflowTracker {
         Some(run.state.clone())
     }
 
-    pub fn clear_run(&mut self, run_id: &str) -> Option<WorkflowRunState> {
+    pub(crate) fn clear_run(&mut self, run_id: &str) -> Option<WorkflowRunState> {
         let idx = self.runs.iter().position(|r| r.state.run_id == run_id)?;
         let mut removed = self.runs.remove(idx);
         removed.fold_elapsed();
@@ -543,18 +560,18 @@ impl WorkflowTracker {
         Some(removed.state)
     }
 
-    pub fn get(&self, run_id: &str) -> Option<WorkflowRunState> {
+    pub(crate) fn get(&self, run_id: &str) -> Option<WorkflowRunState> {
         self.runs
             .iter()
             .find(|r| r.state.run_id == run_id)
             .map(|r| r.state.clone())
     }
 
-    pub fn list(&self) -> Vec<WorkflowRunState> {
+    pub(crate) fn list(&self) -> Vec<WorkflowRunState> {
         self.runs.iter().map(|r| r.state.clone()).collect()
     }
 
-    pub fn elapsed_ms(&self, run_id: &str) -> u64 {
+    pub(crate) fn elapsed_ms(&self, run_id: &str) -> u64 {
         self.runs
             .iter()
             .find(|r| r.state.run_id == run_id)
@@ -562,7 +579,7 @@ impl WorkflowTracker {
             .unwrap_or(0)
     }
 
-    pub fn from_snapshot(snapshots: Vec<WorkflowRunState>) -> Self {
+    pub(crate) fn from_snapshot(snapshots: Vec<WorkflowRunState>) -> Self {
         let runs = snapshots
             .into_iter()
             .map(|mut state| {
@@ -628,7 +645,7 @@ impl WorkflowTracker {
         })
     }
 
-    pub fn take_unreported_terminal_runs(
+    pub(crate) fn take_unreported_terminal_runs(
         &mut self,
     ) -> (Vec<WorkflowRunState>, Vec<WorkflowRunState>) {
         let mut restored = Vec::new();
@@ -651,11 +668,11 @@ impl WorkflowTracker {
         (restored, fresh)
     }
 
-    pub fn snapshot(&self) -> Vec<WorkflowRunState> {
+    pub(crate) fn snapshot(&self) -> Vec<WorkflowRunState> {
         self.list()
     }
 
-    pub fn take_status_report(&mut self) -> Vec<WorkflowRunState> {
+    pub(crate) fn take_status_report(&mut self) -> Vec<WorkflowRunState> {
         let live: Vec<&TrackedRun> = self
             .runs
             .iter()
@@ -794,6 +811,34 @@ mod tests {
     }
 
     #[test]
+    fn rebind_agent_id_points_row_at_retry_child_and_bumps_revision() {
+        let (mut t, id) = tracker_with_run();
+        t.agent_started(
+            &id,
+            WorkflowAgentRow {
+                agent_id: "child-attempt-1".into(),
+                label: "worker".into(),
+                phase: None,
+                model: None,
+                state: "running".into(),
+                tokens_used: 0,
+                duration_ms: 0,
+            },
+        );
+        let before = t.get(&id).unwrap().revision;
+        t.rebind_agent_id(&id, "child-attempt-1", "child-attempt-2");
+        let run = t.get(&id).unwrap();
+        assert_eq!(run.agents.len(), 1);
+        assert_eq!(run.agents[0].agent_id, "child-attempt-2");
+        assert_eq!(run.agents[0].label, "worker");
+        assert_eq!(run.agents[0].state, "running");
+        assert!(run.revision > before);
+
+        t.agent_finished(&id, "child-attempt-2", "done", 42, 1_000);
+        assert_eq!(t.get(&id).unwrap().agents[0].state, "done");
+    }
+
+    #[test]
     fn snapshot_restore_marks_active_non_resumable_interrupted() {
         let (t, _) = tracker_with_run();
         let restored = WorkflowTracker::from_snapshot(t.snapshot());
@@ -825,11 +870,64 @@ mod tests {
     }
 
     #[test]
-    fn resume_rejects_nonpaused_states() {
+    fn resume_rejects_nonresumable_states() {
         let (mut t, id) = tracker_with_run();
         t.interrupt(&id, "lost executor").unwrap();
         assert!(t.resume_run(&id, None).is_none());
         assert_eq!(t.get(&id).unwrap().status, WorkflowRunStatus::Interrupted);
+
+        let (mut t, id) = tracker_with_run();
+        t.apply_outcome(&id, &WorkflowOutcome::Cancelled);
+        assert!(t.resume_run(&id, None).is_none());
+        assert_eq!(t.get(&id).unwrap().status, WorkflowRunStatus::Cancelled);
+
+        let (mut t, id) = tracker_with_run();
+        t.apply_outcome(
+            &id,
+            &WorkflowOutcome::Completed {
+                result: serde_json::json!("done"),
+            },
+        );
+        assert!(t.resume_run(&id, None).is_none());
+        assert_eq!(t.get(&id).unwrap().status, WorkflowRunStatus::Complete);
+    }
+
+    #[test]
+    fn failed_run_resumes_to_active_bumps_epoch_and_cancels_ghost_agents() {
+        let (mut t, id) = tracker_with_run();
+        t.agent_started(
+            &id,
+            WorkflowAgentRow {
+                agent_id: "child".into(),
+                label: "worker".into(),
+                phase: None,
+                model: None,
+                state: "running".into(),
+                tokens_used: 0,
+                duration_ms: 0,
+            },
+        );
+        t.apply_outcome(
+            &id,
+            &WorkflowOutcome::Failed {
+                error: "scratch byte quota exceeded".into(),
+            },
+        );
+        let failed = t.get(&id).unwrap();
+        assert_eq!(failed.status, WorkflowRunStatus::Failed);
+        assert!(failed.status.is_resumable());
+        assert!(failed.status.is_terminal());
+        assert!(!failed.status.is_paused());
+        assert_eq!(t.execution_epoch(&id), Some(0));
+
+        let resumed = t.resume_run(&id, None).unwrap();
+        assert_eq!(resumed.status, WorkflowRunStatus::Active);
+        assert!(resumed.pause_message.is_none());
+        assert_eq!(
+            resumed.agents[0].state, "cancelled",
+            "ghost running agent rows must be cancelled on resume"
+        );
+        assert_eq!(t.execution_epoch(&id), Some(1));
     }
 
     #[test]

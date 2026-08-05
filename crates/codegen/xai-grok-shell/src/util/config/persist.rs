@@ -9,10 +9,6 @@ use xai_grok_agent::prompt::skills::SkillsConfig;
 /// Serializes the read-modify-write in `save_config` so two rapid
 /// settings toggles can't interleave and clobber each other.
 static SAVE_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
-pub async fn save_config(config: &Config) -> Result<()> {
-    let _guard = SAVE_LOCK.lock().await;
-    save_config_locked(config).await
-}
 /// [`save_config`] body; caller must hold [`SAVE_LOCK`].
 async fn save_config_locked(config: &Config) -> Result<()> {
     let path = user_config_path();
@@ -735,6 +731,9 @@ auto_update = true
         "worktree_type",
         "session_registry",
         "minimum_version",
+        "maximum_version",
+        "required_minimum_version",
+        "required_maximum_version",
     ];
     /// Assert that every `CliConfig` `Option<T>` field NOT in `present` is
     /// absent from `table`.

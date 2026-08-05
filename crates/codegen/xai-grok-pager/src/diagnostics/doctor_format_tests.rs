@@ -43,6 +43,7 @@ fn unavailable_tmux() -> TmuxProbeFacts {
         allow_passthrough_support: TmuxProbeResult::Unavailable,
         allow_passthrough: TmuxProbeResult::Unavailable,
         control_mode: TmuxProbeResult::Unavailable,
+        client_features: TmuxProbeResult::Unavailable,
     }
 }
 
@@ -166,11 +167,12 @@ fn tmux_config_and_reload_notes_output_is_stable() {
         &terminal,
         TmuxProbeFacts {
             version: TmuxProbeResult::Unavailable,
-            extended_keys: TmuxProbeResult::Unavailable,
+            extended_keys: TmuxProbeResult::Available("off".to_owned()),
             set_clipboard: TmuxProbeResult::Available("off".to_owned()),
             allow_passthrough_support: TmuxProbeResult::Available(()),
             allow_passthrough: TmuxProbeResult::Available("off".to_owned()),
             control_mode: TmuxProbeResult::Available(false),
+            client_features: TmuxProbeResult::Unavailable,
         },
         &TMUX_ROUTE,
         "pbcopy",
@@ -200,16 +202,19 @@ fn tmux_config_and_reload_notes_output_is_stable() {
             "Issues (3)\n",
             "\n",
             "  ! terminal.tmux-clipboard  `set-clipboard` is off in tmux, so OSC 52 clipboard copies are blocked\n",
+            "      Automatic setup: `grok doctor fix tmux-clipboard`\n",
             "      Add `set -g set-clipboard on` to ~/.byobu/.tmux.conf\n",
-            "      Note: Reload tmux with `tmux source-file ~/.byobu/.tmux.conf`, or detach and reattach.\n",
+            "      Note: Reload tmux with `tmux source-file ~/.byobu/.tmux.conf`, or restart the tmux server.\n",
             "\n",
             "  ! terminal.dcs-passthrough  `allow-passthrough` is off in tmux, which can block clipboard copies in nested sessions\n",
-            "      Add `set -g allow-passthrough on` to ~/.byobu/.tmux.conf\n",
-            "      Note: Reload tmux with `tmux source-file ~/.byobu/.tmux.conf`, or detach and reattach.\n",
+            "      Automatic setup: `grok doctor fix dcs-passthrough`\n",
+            "      Add `set -wg allow-passthrough on` to ~/.byobu/.tmux.conf\n",
+            "      Note: Reload tmux with `tmux source-file ~/.byobu/.tmux.conf`, or restart the tmux server.\n",
             "\n",
             "  ! terminal.tmux-extended-keys  `extended-keys` is off in tmux, so some shortcuts may not work\n",
+            "      Automatic setup: `grok doctor fix tmux-extended-keys`\n",
             "      Add `set -g extended-keys on` to ~/.byobu/.tmux.conf\n",
-            "      Note: Reload tmux with `tmux source-file ~/.byobu/.tmux.conf`, or detach and reattach.\n",
+            "      Note: Reload tmux with `tmux source-file ~/.byobu/.tmux.conf`, or restart the tmux server.\n",
         )
     );
 }
@@ -390,6 +395,7 @@ fn unavailable_and_error_probes_do_not_create_false_issues() {
             allow_passthrough_support: TmuxProbeResult::Unavailable,
             allow_passthrough: TmuxProbeResult::Error("query failed".to_owned()),
             control_mode: TmuxProbeResult::Unavailable,
+            client_features: TmuxProbeResult::Unavailable,
         },
         &TMUX_ROUTE,
         "pbcopy",
@@ -485,6 +491,7 @@ fn runtime_merge_does_not_duplicate_view_findings() {
                 allow_passthrough_support: TmuxProbeResult::Available(()),
                 allow_passthrough: TmuxProbeResult::Available("off".to_owned()),
                 control_mode: TmuxProbeResult::Available(false),
+                client_features: TmuxProbeResult::Unavailable,
             },
             &TMUX_ROUTE,
             "pbcopy",
@@ -503,11 +510,12 @@ fn runtime_merge_does_not_duplicate_view_findings() {
     for id in [
         "terminal.tmux-clipboard",
         "terminal.dcs-passthrough",
+        "terminal.tmux-extended-keys",
         "terminal.limited-color",
     ] {
         assert_eq!(output.matches(id).count(), 1, "{id}:\n{output}");
     }
-    assert!(output.contains("Issues (3)"), "{output}");
+    assert!(output.contains("Issues (4)"), "{output}");
 }
 
 #[test]
@@ -611,6 +619,13 @@ fn keyboard_fact_formats_from_explicit_target_evidence() {
             multiplexer: MultiplexerKind::Undetected,
             byobu: None,
             ssh: false,
+            tmux: crate::diagnostics::TmuxFacts {
+                extended_keys: crate::diagnostics::TmuxOptionFact::Unavailable,
+                set_clipboard: crate::diagnostics::TmuxOptionFact::Unavailable,
+                allow_passthrough_support: crate::diagnostics::TmuxSupportFact::Unavailable,
+                allow_passthrough: crate::diagnostics::TmuxOptionFact::Unavailable,
+                color_passthrough: crate::diagnostics::TmuxColorPassthrough::Unknown,
+            },
             color: ColorFacts {
                 level: RuntimeFact::Available(ColorLevel::TrueColor),
                 available_themes: crate::theme::ThemeKind::ALL.to_vec(),

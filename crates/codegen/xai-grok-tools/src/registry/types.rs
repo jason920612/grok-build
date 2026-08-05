@@ -210,6 +210,15 @@ pub struct ToolServerConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub behavior_preset: Option<String>,
 }
+#[derive(Clone)]
+pub struct SubagentSessionResources {
+    pub backend: crate::implementations::grok_build::task::backend::SubagentBackendResource,
+    /// Same channel as [`Self::backend`]; required so `TaskCompletionReminder`
+    /// can drain completions onto the next tool result (shell parity).
+    pub event_sender: crate::implementations::grok_build::task::types::SubagentEventSender,
+    pub depth: crate::implementations::grok_build::task::types::SubagentDepthCounter,
+    pub session_id: crate::implementations::grok_build::task::types::SessionIdResource,
+}
 /// Everything a session provides at finalization time.
 ///
 /// This is the **public API boundary** — callers pass concrete, strongly-typed
@@ -231,6 +240,8 @@ pub struct SessionContext {
     /// Session ID that owns processes spawned by this session's tools.
     /// Used to scope kill operations on a shared terminal backend.
     pub owner_session_id: Option<String>,
+    /// Complete subagent capability for this session.
+    pub subagent: Option<SubagentSessionResources>,
     /// Parent's scheduler handle. When `Some`, the session reuses the parent's
     /// scheduler actor instead of spawning its own, so scheduled tasks survive
     /// subagent exit.
@@ -518,6 +529,14 @@ pub struct ToolRegistryBuilder {
     tools: HashMap<String, ToolEntry>,
     reminders: Vec<ReminderEntry>,
     shared_local_registry: Option<xai_computer_hub_sdk::LocalRegistry>,
+    /// Whether the client delivers system reminders (completion
+    /// notifications for backgrounded commands/subagents) to the model.
+    /// Exposed to description templates as `system_reminders_enabled` so
+    /// "you are notified on completion" promises are only rendered when
+    /// the client actually delivers them. Defaults to `true` (prod CLI
+    /// behavior); the tools server sets it from
+    /// `FinalizeToolServerConfigRequest.system_reminders_enabled`.
+    system_reminders_enabled: bool,
 }
 impl Default for ToolRegistryBuilder {
     fn default() -> Self {
@@ -657,6 +676,7 @@ impl ToolRegistryBuilder {
             tools: HashMap::new(),
             reminders: Vec::new(),
             shared_local_registry: None,
+            system_reminders_enabled: true,
         };
         b.register_with_params::<grok_build::BashTool, grok_build::bash::BashParams>();
         b.register_with_params::<grok_build::ReadFileTool, grok_build::read_file::ReadFileParams>();
@@ -922,6 +942,13 @@ impl ToolRegistryBuilder {
     }
     /// Validate and finalize into an immutable toolset.
     /// Consumes the builder — no further modifications possible.
+    /// Set whether the client delivers system reminders to the model.
+    /// Must be called before [`finalize`]; affects how description
+    /// templates render notification promises (see
+    /// `TemplateContext::system_reminders_enabled`).
+    pub fn set_system_reminders_enabled(&mut self, enabled: bool) {
+        self.system_reminders_enabled = enabled;
+    }
     pub fn finalize(
         self,
         config: ToolServerConfig,
@@ -971,7 +998,8 @@ impl ToolRegistryBuilder {
                 map.extend(overrides.iter().map(|(k, v)| (k.clone(), v.clone())));
             }
         }
-        let renderer = TemplateRenderer::new(kind_to_name.clone(), kind_params.clone());
+        let renderer = TemplateRenderer::new(kind_to_name.clone(), kind_params.clone())
+            .with_system_reminders_enabled(self.system_reminders_enabled);
         let mut tools = Vec::new();
         let mut resources = Resources::new();
         resources.insert(crate::types::resources::Terminal(ctx.backend));
@@ -980,8 +1008,14 @@ impl ToolRegistryBuilder {
         resources.insert(crate::types::resources::Cwd(cwd.clone()));
         resources.insert(crate::types::resources::SessionFolder(ctx.session_folder));
         resources.insert(crate::types::resources::SessionEnv(ctx.session_env));
-        if let Some(owner_session_id) = ctx.owner_session_id {
+        if let Some(owner_session_id) = ctx.owner_session_id.clone() {
             resources.insert(crate::types::resources::OwnerSessionId(owner_session_id));
+        }
+        if let Some(subagent) = ctx.subagent {
+            resources.insert(subagent.backend);
+            resources.insert(subagent.event_sender);
+            resources.insert(subagent.depth);
+            resources.insert(subagent.session_id);
         }
         let scheduler_notification_handle = ctx.notification_handle.clone();
         resources.insert(crate::types::resources::NotificationHandle(
@@ -993,6 +1027,9 @@ impl ToolRegistryBuilder {
         ));
         {
             let mut mgr = crate::types::skill_discovery_tracker::SkillManager::new();
+            mgr.set_discovery_snapshot_names(
+                startup_skills.iter().map(|s| s.name.clone()).collect(),
+            );
             mgr.seed(Some(cwd.clone()), None, startup_skills, None, None, None);
             let _ = mgr.take_pending();
             resources.insert(mgr);
@@ -1013,9 +1050,15 @@ impl ToolRegistryBuilder {
         if let Some(lsp) = ctx.lsp {
             resources.insert(lsp);
         }
-        if ctx.image_gen_config.has_credentials() {
+        let mut image_gen_config = ctx.image_gen_config;
+        let mut video_gen_config = ctx.video_gen_config;
+        if let Some(session_id) = &ctx.owner_session_id {
+            image_gen_config.stamp_session_id_header(session_id);
+            video_gen_config.stamp_session_id_header(session_id);
+        }
+        if image_gen_config.has_credentials() {
             match crate::implementations::grok_build::image_gen::ImageGenClient::new(
-                &ctx.image_gen_config,
+                &image_gen_config,
                 ctx.api_key_provider.clone(),
             ) {
                 Ok(client) => {
@@ -1027,9 +1070,9 @@ impl ToolRegistryBuilder {
                 }
             }
         }
-        if ctx.video_gen_config.is_enabled() {
+        if video_gen_config.is_enabled() {
             match crate::implementations::grok_build::video_gen::VideoGenClient::new(
-                &ctx.video_gen_config,
+                &video_gen_config,
                 ctx.api_key_provider.clone(),
             ) {
                 Ok(client) => {
@@ -1142,9 +1185,16 @@ impl ToolRegistryBuilder {
                     desc,
                     &client_name,
                     crate::DEFAULT_TOOL_OUTPUT_BYTES,
+                    xai_tool_types::max_wait_block_ms(),
                 ));
             }
             renderer.render_schema_descriptions(&mut definition.function.parameters);
+            truncation_config.apply_to_schema(
+                &mut definition.function.parameters,
+                &client_name,
+                crate::DEFAULT_TOOL_OUTPUT_BYTES,
+                xai_tool_types::max_wait_block_ms(),
+            );
             (entry.apply_params)(&effective_params, &mut resources);
             tools.push(FinalizedTool {
                 namespace: entry.namespace,
@@ -1303,6 +1353,13 @@ impl FinalizedToolset {
     pub fn local_registry(&self) -> &xai_computer_hub_sdk::LocalRegistry {
         &self.local_registry
     }
+    /// Whether the server must await this tool's in-process cancellation cleanup.
+    pub fn cooperative_cancellation(&self, tool_name: &str) -> bool {
+        {
+            let _ = tool_name;
+            false
+        }
+    }
     /// Get all tool definitions to send to the client.
     pub fn tool_definitions(&self) -> Vec<ToolDefinition> {
         self.tools
@@ -1325,6 +1382,23 @@ impl FinalizedToolset {
             .iter()
             .map(|t| (t.client_name.clone(), t.metadata.kind().as_key().to_owned()))
             .collect()
+    }
+    /// Map of client-facing tool name → typed [`ToolKind`].
+    ///
+    /// Unlike the finalize-request `ToolConfig`s (whose `kind` is `None` when
+    /// built from raw IDs over gRPC), the finalized tools always know their
+    /// real kind from the registry metadata — use this for kind-derived
+    /// metadata in server responses (e.g. capability-mode classification).
+    pub fn tool_kind_map(&self) -> HashMap<String, ToolKind> {
+        self.tools
+            .read()
+            .iter()
+            .map(|t| (t.client_name.clone(), t.metadata.kind()))
+            .collect()
+    }
+    /// Finalized canonical-to-client parameter names by tool kind.
+    pub fn template_param_names(&self) -> HashMap<ToolKind, HashMap<String, String>> {
+        self.renderer.param_names()
     }
     pub async fn update_resource<T: Send + Sync + 'static>(&self, resource: T) {
         self.resources.lock().await.insert(resource);
@@ -1443,6 +1517,9 @@ impl FinalizedToolset {
         let mut ctx = xai_tool_runtime::ToolCallContext::new(parent_ctx.call_id.clone());
         ctx.extensions.insert(self.resources.clone());
         ctx.extensions.insert_arc(Arc::clone(&self.renderer));
+        if let Some(cancellation) = parent_ctx.get::<xai_tool_runtime::Cancellation>() {
+            ctx.extensions.insert((*cancellation).clone());
+        }
         ctx.extensions.insert(
             crate::types::resources::InvokingToolParamNames::from_reverse_params(&reverse_params),
         );
@@ -1475,8 +1552,26 @@ impl FinalizedToolset {
         tool_call_id: &str,
         cwd_override: Option<std::path::PathBuf>,
     ) -> Result<ToolRunResult, xai_tool_runtime::ToolError> {
+        self.call_with_cancellation(tool_name, tool_args, tool_call_id, cwd_override, None)
+            .await
+    }
+    /// Dispatch with cooperative cancellation exposed to the tool.
+    pub async fn call_with_cancellation(
+        self: &Arc<Self>,
+        tool_name: &str,
+        tool_args: serde_json::Value,
+        tool_call_id: &str,
+        cwd_override: Option<std::path::PathBuf>,
+        cancellation: Option<tokio_util::sync::CancellationToken>,
+    ) -> Result<ToolRunResult, xai_tool_runtime::ToolError> {
         use futures::StreamExt;
-        let mut stream = self.call_streaming(tool_name, tool_args, tool_call_id, cwd_override);
+        let mut stream = self.call_streaming_with_cancellation(
+            tool_name,
+            tool_args,
+            tool_call_id,
+            cwd_override,
+            cancellation,
+        );
         while let Some(item) = stream.next().await {
             match item {
                 xai_tool_runtime::ToolStreamItem::Progress(_) => continue,
@@ -1506,6 +1601,23 @@ impl FinalizedToolset {
         tool_call_id: &str,
         cwd_override: Option<std::path::PathBuf>,
     ) -> xai_tool_runtime::ToolStream<ToolRunResult> {
+        self.call_streaming_with_cancellation(
+            tool_name,
+            tool_args,
+            tool_call_id,
+            cwd_override,
+            None,
+        )
+    }
+    /// Streaming dispatch with cooperative cancellation exposed to the tool.
+    pub fn call_streaming_with_cancellation(
+        self: &Arc<Self>,
+        tool_name: &str,
+        tool_args: serde_json::Value,
+        tool_call_id: &str,
+        cwd_override: Option<std::path::PathBuf>,
+        cancellation: Option<tokio_util::sync::CancellationToken>,
+    ) -> xai_tool_runtime::ToolStream<ToolRunResult> {
         use futures::StreamExt;
         let this = Arc::clone(self);
         let tool_name = tool_name.to_owned();
@@ -1520,6 +1632,7 @@ impl FinalizedToolset {
                 tool_args,
                 &tool_call_id,
                 cwd_override,
+                cancellation,
             ) {
                 Ok(parts) => parts,
                 Err(e) => {
@@ -1737,6 +1850,7 @@ impl FinalizedToolset {
         tool_args: serde_json::Value,
         tool_call_id: &str,
         cwd_override: Option<std::path::PathBuf>,
+        cancellation: Option<tokio_util::sync::CancellationToken>,
     ) -> Result<DispatchParts, xai_tool_runtime::ToolError> {
         let (registry_id, output_converter, reverse_params) = {
             let tools = self.tools.read();
@@ -1775,6 +1889,10 @@ impl FinalizedToolset {
         );
         if let Some(cwd) = cwd_override {
             ctx.extensions.insert(xai_tool_runtime::Cwd(cwd));
+        }
+        if let Some(cancellation) = cancellation {
+            ctx.extensions
+                .insert(xai_tool_runtime::Cancellation(cancellation));
         }
         if let Some(ref version) = contract_version {
             ctx.extensions
@@ -2050,6 +2168,10 @@ pub fn generate_schema<T: schemars::JsonSchema>() -> serde_json::Value {
     let generator = settings.into_generator();
     let schema = generator.into_root_schema_for::<T>();
     let mut value = serde_json::to_value(&schema).unwrap_or_default();
+    if let Some(obj) = value.as_object_mut() {
+        obj.remove("title");
+        obj.remove("description");
+    }
     if let Some(obj) = value.as_object_mut()
         && obj.get("type").and_then(|v| v.as_str()) == Some("object")
     {
@@ -2279,6 +2401,7 @@ mod tests {
             session_env: Arc::new(HashMap::new()),
             notification_handle: crate::notification::ToolNotificationHandle::noop(),
             owner_session_id: None,
+            subagent: None,
             parent_scheduler_handle: None,
             skills: vec![],
             state_path: tmp.path().join("state.json"),
@@ -2535,6 +2658,7 @@ mod tests {
             .into_iter()
             .map(|id| ToolConfig::from_id(format!("GrokBuild:{id}")))
             .chain(std::iter::empty::<ToolConfig>())
+            .chain(std::iter::empty::<ToolConfig>())
             .collect(),
             behavior_preset: None,
         };
@@ -2543,7 +2667,53 @@ mod tests {
         let toolset = builder
             .finalize(config, ctx)
             .expect("full toolset should finalize");
-        for def in toolset.tool_definitions() {
+        fn assert_no_render_whitespace_artifacts(name: &str, text: &str) {
+            let mut in_code_block = false;
+            for line in text.lines() {
+                let trimmed = line.trim_start();
+                if trimmed.starts_with("```") {
+                    in_code_block = !in_code_block;
+                    continue;
+                }
+                if in_code_block {
+                    continue;
+                }
+                assert!(
+                    !trimmed.contains("  "),
+                    "{name}: double space (template render artifact?) in line: {line:?}"
+                );
+                assert!(
+                    !trimmed.contains(" , "),
+                    "{name}: stranded space before comma in line: {line:?}"
+                );
+                if let Some((_, roster)) = trimmed.split_once("access to:") {
+                    assert!(
+                        roster.starts_with(' '),
+                        "{name}: roster lost its separators (stripping guard?) in line: {line:?}"
+                    );
+                }
+            }
+        }
+        fn collect_descriptions(v: &serde_json::Value, out: &mut Vec<String>) {
+            match v {
+                serde_json::Value::Object(map) => {
+                    if let Some(serde_json::Value::String(d)) = map.get("description") {
+                        out.push(d.clone());
+                    }
+                    for val in map.values() {
+                        collect_descriptions(val, out);
+                    }
+                }
+                serde_json::Value::Array(arr) => {
+                    for val in arr {
+                        collect_descriptions(val, out);
+                    }
+                }
+                _ => {}
+            }
+        }
+        let definitions = toolset.tool_definitions();
+        for def in definitions {
             let name = &def.function.name;
             let desc = def.function.description.as_deref().unwrap_or_default();
             assert!(
@@ -2562,6 +2732,7 @@ mod tests {
                 !desc.contains("the  tool"),
                 "{name}: empty tool name (missing conditional guard)"
             );
+            assert_no_render_whitespace_artifacts(name, desc);
             let params_str = def.function.parameters.to_string();
             assert!(
                 !params_str.contains("${{"),
@@ -2571,6 +2742,15 @@ mod tests {
                 !params_str.contains("${%"),
                 "{name}: unresolved jinja block in a field description"
             );
+            let mut field_descs = Vec::new();
+            collect_descriptions(&def.function.parameters, &mut field_descs);
+            for field_desc in &field_descs {
+                assert_no_render_whitespace_artifacts(name, field_desc);
+                assert!(
+                    !field_desc.contains("{max_"),
+                    "{name}: unresolved {{max_*}} placeholder in a field description"
+                );
+            }
         }
     }
     /// Bash mode resolves the toolset's execute tool by kind, not a hardcoded
@@ -2751,6 +2931,74 @@ mod tests {
             "replace_all description should reference the renamed param: {replace_all_desc}"
         );
     }
+    /// Descriptions promising completion notifications ("You are notified on
+    /// completion") render conditionally on the client's system-reminders
+    /// setting, plumbed via `set_system_reminders_enabled` into the
+    /// `TemplateRenderer`. With reminders disabled, the bash description and
+    /// the `is_background` field description must not promise notifications;
+    /// they point at the get-output tool instead when one is served.
+    #[tokio::test]
+    async fn bash_descriptions_track_system_reminders_setting() {
+        let config_with = |ids: &[&str]| ToolServerConfig {
+            tools: ids
+                .iter()
+                .map(|id| ToolConfig::from_id((*id).to_string()))
+                .collect(),
+            behavior_preset: None,
+        };
+        let bash_texts = |toolset: &FinalizedToolset| {
+            let defs = toolset.tool_definitions();
+            let bash = defs
+                .iter()
+                .find(|d| d.function.name == "run_terminal_cmd")
+                .expect("run_terminal_cmd definition not found")
+                .clone();
+            let desc = bash.function.description.clone().unwrap_or_default();
+            let field_desc = bash.function.parameters["properties"]["is_background"]["description"]
+                .as_str()
+                .unwrap_or_default()
+                .to_string();
+            (desc, field_desc)
+        };
+        let ids = [
+            "GrokBuild:run_terminal_cmd",
+            "GrokBuild:get_task_output",
+            "GrokBuild:kill_task",
+        ];
+        let tmp = TempDir::new().unwrap();
+        let toolset = ToolRegistryBuilder::new()
+            .finalize(config_with(&ids), test_session_context(&tmp))
+            .expect("finalize");
+        let (desc, field_desc) = bash_texts(&toolset);
+        assert!(
+            desc.contains("You are notified on completion"),
+            "reminders on: description should promise notification: {desc}"
+        );
+        assert!(
+            field_desc.contains("you are notified on completion"),
+            "reminders on: is_background description should promise notification: {field_desc}"
+        );
+        let tmp = TempDir::new().unwrap();
+        let mut builder = ToolRegistryBuilder::new();
+        builder.set_system_reminders_enabled(false);
+        let toolset = builder
+            .finalize(config_with(&ids), test_session_context(&tmp))
+            .expect("finalize");
+        let (desc, field_desc) = bash_texts(&toolset);
+        assert!(
+            !desc.contains("notified on completion"),
+            "reminders off: description must not promise notification: {desc}"
+        );
+        assert!(
+            desc.contains("Check on it later with the get_task_output tool"),
+            "reminders off: description should point at get_task_output: {desc}"
+        );
+        assert!(
+            !field_desc.contains("notified on completion")
+                && field_desc.contains("check on it later with the get_task_output tool"),
+            "reminders off: is_background description should point at get_task_output: {field_desc}"
+        );
+    }
     /// Each assertion pattern-matches on the exact `ToolOutput::SearchReplace`
     /// variant so the test fails if the renderer silently returns empty strings
     /// or the tool returns the wrong variant.
@@ -2845,7 +3093,8 @@ mod tests {
             ToolOutput::SearchReplace(SearchReplaceOutput::NoMatchesFound(e)) => {
                 assert_eq!(
                     e.message,
-                    "The string to replace was not found in the file, use the read_file tool to see the correct string.",
+                    "The string to replace was not found in the file, use the read_file tool to see the correct string. \
+                     The user may have changed the file since you last read it.",
                 );
             }
             other => panic!("Expected SearchReplace(NoMatchesFound), got: {other:?}"),
@@ -3515,6 +3764,119 @@ mod tests {
         );
     }
     #[tokio::test]
+    async fn non_pi_finalized_contract_snapshot_is_unchanged() {
+        let tmp = TempDir::new().unwrap();
+        let toolset = ToolRegistryBuilder::new()
+            .finalize(
+                ToolServerConfig {
+                    tools: vec![
+                        ToolConfig::for_tool::<grok_build::TodoWriteTool>(),
+                        ToolConfig::for_tool::<opencode::OpenCodeWriteTool>(),
+                    ],
+                    behavior_preset: None,
+                },
+                test_session_context(&tmp),
+            )
+            .unwrap();
+        let mut contracts: Vec<serde_json::Value> = toolset
+            .tool_definitions()
+            .into_iter()
+            .map(|definition| {
+                serde_json::json!({
+                    "name": definition.function.name,
+                    "description": definition.function.description,
+                    "parameters": definition.function.parameters,
+                })
+            })
+            .collect();
+        contracts.sort_by(|a, b| a["name"].as_str().cmp(&b["name"].as_str()));
+        let expected: serde_json::Value = serde_json::from_str(
+                r##"
+        [
+          {
+            "name": "todo_write",
+            "description": "Create and manage a structured task list. The user sees this list live — it is your primary way to show progress.\n\nUse for any task with 3+ steps. Skip for trivial single-step work.",
+            "parameters": {
+              "$schema": "http://json-schema.org/draft-07/schema#",
+              "required": [
+                "todos"
+              ],
+              "type": "object",
+              "properties": {
+                "merge": {
+                  "description": "Optional. When true (default), merges the provided todos into the existing list by id — send only the items you are changing, and to flip status without changing content send just id + status. When false, the provided todos replace the existing list.",
+                  "type": "boolean",
+                  "default": true
+                },
+                "todos": {
+                  "description": "Array of todo items to write to the workspace",
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "id": {
+                        "description": "Unique identifier for the todo item",
+                        "type": "string"
+                      },
+                      "content": {
+                        "description": "The description/content of the todo item",
+                        "type": [
+                          "string",
+                          "null"
+                        ]
+                      },
+                      "status": {
+                        "description": "The status of the todo item: pending, in_progress, completed, or cancelled",
+                        "type": [
+                          "string",
+                          "null"
+                        ],
+                        "enum": [
+                          "pending",
+                          "in_progress",
+                          "completed",
+                          "cancelled",
+                          null
+                        ]
+                      }
+                    },
+                    "required": [
+                      "id"
+                    ]
+                  }
+                }
+              }
+            }
+          },
+          {
+            "name": "write",
+            "description": "Create or overwrite a file.\n\n- Writing to an existing path replaces the file.\n- Parent directories are created for you.",
+            "parameters": {
+              "$schema": "http://json-schema.org/draft-07/schema#",
+              "required": [
+                "file_path",
+                "content"
+              ],
+              "properties": {
+                "file_path": {
+                  "description": "The absolute path to the file to write.",
+                  "type": "string"
+                },
+                "content": {
+                  "description": "The full file content to write.",
+                  "type": "string"
+                }
+              },
+              "type": "object"
+            }
+          }
+        ]
+"##,
+            )
+            .expect("checked-in snapshot parses");
+        assert_eq!(expected, serde_json::Value::Array(contracts));
+    }
+    #[tokio::test]
     async fn tool_definitions_builtins_only_hides_mcp_tools() {
         let tmp = TempDir::new().unwrap();
         let builder = ToolRegistryBuilder::new();
@@ -3891,6 +4253,22 @@ mod tests {
             assert!(
                 desc.contains("run_in_background"),
                 "`{name}` description must resolve params.task.run_in_background"
+            );
+            let timeout = defs
+                .iter()
+                .find(|d| d.function.name == name)
+                .map(|d| &d.function.parameters["properties"]["timeout_ms"])
+                .unwrap_or_else(|| panic!("`{name}` should expose timeout_ms"));
+            assert!(
+                timeout.get("maximum").is_some(),
+                "`{name}`.timeout_ms must carry the resolved wait ceiling: {timeout}"
+            );
+            assert!(
+                !timeout["description"]
+                    .as_str()
+                    .unwrap_or("")
+                    .contains("{max_"),
+                "`{name}`.timeout_ms has an unresolved placeholder: {timeout}"
             );
         }
     }
@@ -4731,6 +5109,29 @@ mod tests {
             assert_eq!(skills.0.len(), 2, "should have exactly 2 skills");
         }
     }
+    /// generate_schema strips the boilerplate root `title` (struct name) and
+    /// root `description` (struct doc "Input for the <canonical> tool") so the
+    /// canonical name can't leak via parameters.description after randomization
+    /// renames the tool. $schema and per-property descriptions are retained.
+    #[test]
+    fn generate_schema_strips_root_title_and_description() {
+        let schema = generate_schema::<crate::implementations::grok_build::bash::BashToolInput>();
+        assert!(
+            schema.get("title").is_none(),
+            "root title (struct name) must be stripped: {schema}"
+        );
+        assert!(
+            schema.get("description").is_none(),
+            "root description (leaks canonical tool name) must be stripped: {schema}"
+        );
+        assert!(schema.get("$schema").is_some(), "$schema must be retained");
+        assert!(
+            schema["properties"]
+                .as_object()
+                .is_some_and(|p| !p.is_empty()),
+            "per-property schema must be retained: {schema}"
+        );
+    }
     fn toolset_with_viewer_ctx(
         viewer_ctx: Option<xai_tool_runtime::WorkspaceViewerContext>,
     ) -> (Arc<FinalizedToolset>, TempDir) {
@@ -4771,6 +5172,7 @@ mod tests {
                 serde_json::json!({"target_file": "noop"}),
                 "test-call",
                 None,
+                None,
             )
             .expect("prepare_dispatch succeeds");
         let wvc = parts
@@ -4788,6 +5190,7 @@ mod tests {
                 "read_file",
                 serde_json::json!({"target_file": "noop"}),
                 "test-call",
+                None,
                 None,
             )
             .expect("prepare_dispatch succeeds");

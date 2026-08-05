@@ -712,7 +712,7 @@ impl SubagentTokenRecord {
     /// report below the anchor yields 0 instead of underflowing. Shared by
     /// the single-line total ([`SessionActor::goal_tokens`]) and the
     /// per-model breakdown ([`fold_tokens_by_model`]) so they can't drift.
-    pub fn marginal(&self) -> u64 {
+    pub(crate) fn marginal(&self) -> u64 {
         self.last_cumulative_reported
             .saturating_sub(self.resume_anchor_cumulative)
     }
@@ -1112,6 +1112,9 @@ impl SessionActor {
         let spawner: std::sync::Arc<dyn crate::session::goal_planner::GoalPlannerSpawner> =
             std::sync::Arc::new(crate::session::goal_planner::ChannelSpawner {
                 event_tx,
+                foreground_wait: Some(crate::tools::tool_context::subagent_foreground_wait(
+                    self.tool_context.blocking_wait_depth.clone(),
+                )),
                 parent_session_id: self.session_id_string(),
                 parent_prompt_id,
                 cwd: Some(self.tool_context.cwd.as_str().to_owned()),
@@ -1281,6 +1284,9 @@ impl SessionActor {
         let spawner: std::sync::Arc<dyn crate::session::goal_strategist::GoalStrategistSpawner> =
             std::sync::Arc::new(crate::session::goal_strategist::ChannelSpawner {
                 event_tx,
+                foreground_wait: Some(crate::tools::tool_context::subagent_foreground_wait(
+                    self.tool_context.blocking_wait_depth.clone(),
+                )),
                 parent_session_id: self.session_id_string(),
                 parent_prompt_id,
                 cwd: Some(self.tool_context.cwd.as_str().to_owned()),
@@ -1383,6 +1389,9 @@ impl SessionActor {
         let spawner: std::sync::Arc<dyn crate::session::goal_summarizer::GoalSummarizerSpawner> =
             std::sync::Arc::new(crate::session::goal_summarizer::ChannelSpawner {
                 event_tx,
+                foreground_wait: Some(crate::tools::tool_context::subagent_foreground_wait(
+                    self.tool_context.blocking_wait_depth.clone(),
+                )),
                 parent_session_id: self.session_id_string(),
                 parent_prompt_id,
                 cwd: Some(self.tool_context.cwd.as_str().to_owned()),

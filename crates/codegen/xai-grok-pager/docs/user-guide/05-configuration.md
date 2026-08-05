@@ -27,8 +27,8 @@ Location: `~/.grok/config.toml`. If the file is missing, Grok uses its built-in 
 auto_update = true                     # check for updates on launch
 
 [models]
-default = "grok-build"                 # model used for new sessions
-web_search = "grok-4.20-multi-agent"   # model used by the web_search tool
+default = "grok-4.5"                   # model used for new sessions
+web_search = "grok-4.5"                # model used by the web_search tool
 
 # Defaults applied to every model; a per-model [model.<id>] value always wins.
 # See "Custom Models" for the per-model overrides and full details.
@@ -221,9 +221,11 @@ temperature = 0.7                     # sampling temperature (0.0-2.0)
 top_p = 0.95                          # nucleus sampling parameter
 max_completion_tokens = 8192          # max tokens per response
 context_window = 128000               # context window size (for auto-compact)
+query_params = { api-version = "2026-07-22" } # query params appended to every request URL
+env_http_headers = { "X-Tenant" = "TENANT_TOKEN" }    # request headers from env vars, resolved at client build
 ```
 
-Credential resolution: `api_key` > `env_key` > signed-in session token > `XAI_API_KEY`.
+Credential resolution: `api_key` > `env_key` > signed-in session token > `XAI_API_KEY`. See [Custom Models](11-custom-models.md#request-query-parameters) for `query_params` and `env_http_headers`, and [Sandbox Mode](18-sandbox.md#shell-environment-policy) for `[shell_environment_policy]`, which restricts the environment variables tool subprocesses inherit.
 
 To override a built-in model, use its name as the section key and set only the fields you need:
 
@@ -369,13 +371,12 @@ disabled = ["user/a1b2c3d4/noisy-plugin"]
 
 ### Hints
 
-`[hints]` holds small persisted UI preferences — mostly "stop asking me" opt-outs. Grok writes these for you when you pick a "don't ask again" option in the TUI, but you can edit or delete them by hand; removing a key restores the default.
+`[hints]` holds small persisted UI preferences: remembered answers and modal layout. Grok writes these for you as you use the TUI, but you can edit or delete them by hand; removing a key restores the default.
 
-`[hints]` is read from the **effective config merge**, with the usual precedence: system managed → user `managed_config.toml` → user `config.toml` → user `requirements.toml` → system `requirements.toml`, higher layers winning. The TUI only ever **writes** opt-outs to your user `~/.grok/config.toml`.
+`[hints]` is read from the **effective config merge**, with the usual precedence: system managed → user `managed_config.toml` → user `config.toml` → user `requirements.toml` → system `requirements.toml`, higher layers winning. The TUI only ever **writes** these to your user `~/.grok/config.toml`.
 
 ```toml
 [hints]
-project_picker_disabled = false        # skip the project-directory picker
 memory_modal_fullscreen = false        # remember the memory modal fullscreen state
 new_session_worktree_mode = "never"    # /new worktree prompt: "ask" | "always" | "never"
 fork_worktree_mode = "ask"             # /fork worktree prompt: "ask" | "always" | "never"
@@ -383,7 +384,6 @@ fork_worktree_mode = "ask"             # /fork worktree prompt: "ask" | "always"
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
-| `project_picker_disabled` | bool | `false` | When `true`, skips the picker that asks you to choose a project directory on the first prompt when Grok launches from a non-project directory (home, Desktop, Downloads, `/tmp`). Set automatically when you choose **"Don't ask me again"** in that picker. Teams can pin it in `managed_config.toml` or `requirements.toml`. |
 | `memory_modal_fullscreen` | bool | `false` | Remembers whether the memory modal was last opened fullscreen. |
 | `new_session_worktree_mode` | string | `"never"` | Worktree prompt for `/new`: `ask` shows the popup, `always` creates a worktree, `never` skips it. |
 | `fork_worktree_mode` | string | `"ask"` | Worktree prompt for `/fork`: `ask`, `always`, or `never`. |
@@ -484,7 +484,7 @@ Keyboard shortcuts are **not** configurable — all bindings are built in. See [
 These are independent knobs (see [Monitoring Usage](24-monitoring-usage.md#related-settings)):
 
 - **`[features] telemetry`** / `GROK_TELEMETRY_ENABLED` — the product-analytics master switch. `/privacy` doesn't change it.
-- **`/privacy`** / Settings — coding-data sharing, separate from telemetry.
+- **Coding data, retention, and training** — the Settings row `/privacy` opens; coding-data sharing, separate from telemetry.
 - **`[telemetry] trace_upload`** / `GROK_TELEMETRY_TRACE_UPLOAD` — session traces; follows telemetry when unset.
 - **`[telemetry] otel_*`** / `GROK_EXTERNAL_OTEL` — external OTEL to your own collector (below).
 
@@ -512,6 +512,41 @@ otel_protocol = "http/protobuf"                           # http/protobuf | grpc
 otel_log_user_prompts = false                             # content gate (admins can pin via requirements)
 otel_log_tool_details = false                             # content gate (admins can pin via requirements)
 ```
+
+### Version pinning
+
+Control which versions the CLI may auto-update to and which versions may run. Set
+these in `[cli]`, or in a managed layer for fleet-wide policy. Each has an
+environment override that can only tighten the bound, for CI and testing.
+
+> **Changed:** `minimum_version` no longer blocks startup. It is now a soft
+> anti-downgrade floor for the updater. For a hard floor that prevents old
+> versions from starting, use `required_minimum_version`.
+
+```toml
+[cli]
+minimum_version = "0.2.109"          # updater won't downgrade below this
+maximum_version = "0.2.180"          # updater won't install above this
+required_minimum_version = "0.2.100" # refuse to start below this
+required_maximum_version = "0.2.200" # refuse to start above this
+```
+
+- `minimum_version` (`GROK_MINIMUM_VERSION`) is a soft anti-downgrade floor. The
+  updater skips a target below it and keeps the current version. It never blocks
+  startup.
+- `maximum_version` (`GROK_MAXIMUM_VERSION`) is a soft ceiling. The updater caps
+  its target at it and never installs above it.
+- `required_minimum_version` (`GROK_REQUIRED_MINIMUM_VERSION`) and
+  `required_maximum_version` (`GROK_REQUIRED_MAXIMUM_VERSION`) are hard bounds. If
+  the running version is outside the range, the CLI exits at startup and instructs
+  the user to install an approved version. `grok update` and `grok --version` keep
+  working so an out-of-range install can recover.
+- Bounds resolve across config layers by tightening only: a floor takes the
+  highest value and a ceiling the lowest, so a managed bound can't be loosened,
+  and a user or environment bound can't cancel a managed hard bound. An invalid
+  value is ignored so a bad policy can't block startup.
+- An explicit `grok update --version X` is allowed above the ceiling, to recover
+  from a too-new install, and rejected below the hard floor.
 
 ### Enterprise deployment
 
@@ -593,7 +628,7 @@ gap_right = 0                         # gap between scrollbar and screen edge
 [scrollback.scroll]
 margin = 0                            # minimum context lines above/below selection
 min_page_fraction = 0                 # minimum scroll as % of viewport (0-100)
-follow_indicator = "center"           # follow indicator: "center" or "none"
+follow_indicator = "center"           # ▼/▲ scroll indicators: "center" or "none"
 follow_auto_select = true             # auto-select latest entry in follow mode
 follow_by_overscroll = true           # scrolling past bottom engages follow mode
 anchor_on_fold = true                 # keep block position when folding

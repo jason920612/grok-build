@@ -94,6 +94,11 @@ struct AgentLoadOutcome {
     /// client is driving mid-reconnect, adopted at finalize (mirrors the
     /// `SessionLoaded` adoption in `dispatch.rs`).
     running_prompt_id: Option<String>,
+    /// `x.ai/schedulerBackgroundLoops` from the reload response. A reconnect
+    /// re-spawns the session actor, which re-pins the fire mode, so the
+    /// pre-reconnect value can be stale — adopt the reloaded one or `/loop`
+    /// describes a runtime the new actor will not use.
+    scheduler_background_loops: Option<bool>,
 }
 
 /// Fields of the reconnect `session/load`, derived from the agent being
@@ -165,10 +170,11 @@ fn plan_reconnect_load(
 fn reconnect_restore_outcome(
     init_ok: bool,
     pending_agent_ids: &[super::agent::AgentId],
-    loads: &std::collections::HashMap<super::agent::AgentId, (bool, Option<String>)>,
+    loads: &std::collections::HashMap<super::agent::AgentId, (bool, Option<String>, Option<bool>)>,
     active_agent_id: Option<super::agent::AgentId>,
 ) -> (bool, bool) {
-    let load_ok = |id: &super::agent::AgentId| -> bool { loads.get(id).is_some_and(|(ok, _)| *ok) };
+    let load_ok =
+        |id: &super::agent::AgentId| -> bool { loads.get(id).is_some_and(|(ok, ..)| *ok) };
     let all_restored = init_ok && pending_agent_ids.iter().all(load_ok);
     let active_restored = init_ok
         && active_agent_id.is_some_and(|aid| pending_agent_ids.contains(&aid) && load_ok(&aid));
@@ -817,6 +823,18 @@ pub(crate) async fn run(
     app.subagents = !args.no_subagents;
     app.ask_user = !args.no_ask_user;
     app.chat_mode = args.chat();
+    #[cfg(feature = "local-workspace")]
+    {
+        let stamp = crate::app::session_startup::active_local_workspace()
+            .ok()
+            .flatten();
+        app.local_workspace_startup_locked = stamp.is_some();
+        if app.local_workspace_startup_locked {
+            app.welcome_workspace_mode =
+                crate::views::welcome::workspace_mode::mode_from_active_stamp(stamp.as_ref());
+            crate::views::welcome::workspace_mode::log_cli_lock_applied(app.welcome_workspace_mode);
+        }
+    }
     app.restore_code = args.restore_code.then_some(true);
     if let Some(ref agent) = args.agent {
         match crate::headless::resolve_agent_arg(agent) {
@@ -861,10 +879,7 @@ pub(crate) async fn run(
         .as_ref()
         .and_then(|s| s.show_resolved_model)
         .unwrap_or(true);
-    app.sharing_enabled = remote_settings
-        .as_ref()
-        .and_then(|s| s.sharing_enabled)
-        .unwrap_or(false);
+    app.sharing_enabled = false;
     app.privacy_notice_rollout = xai_grok_config::env_bool("GROK_PRIVACY_NOTICE_ROLLOUT")
         .or_else(|| {
             remote_settings
@@ -990,6 +1005,9 @@ pub(crate) async fn run(
         vec![]
     };
 
+    app.has_external_auth_provider =
+        crate::slash::commands::usage::detect_external_auth_provider(&app.auth_methods);
+
     if let Some(meta) = connection.auth_meta.as_ref() {
         match serde_json::from_value::<xai_grok_shell::auth::AuthMeta>(meta.clone()) {
             Ok(auth_meta) => app.apply_auth_meta(&auth_meta),
@@ -1000,8 +1018,9 @@ pub(crate) async fn run(
         app.is_api_key_auth = app.auth_methods.iter().any(|m| {
             m.id().0.as_ref() == xai_grok_shell::agent::auth_method::XAI_API_KEY_METHOD_ID
         });
-        // No AuthMeta on this path — API keys have no consumer billing surface.
-        if app.is_api_key_auth {
+        // No AuthMeta on this path — API keys / external auth have no
+        // consumer billing surface. External auth also hides `/usage`.
+        if app.is_api_key_auth || app.has_external_auth_provider {
             app.usage_visible = false;
             app.sync_billing_surface_to_agents();
         }
@@ -1123,6 +1142,18 @@ pub(crate) async fn run(
         .value,
     );
 
+    // Pre-arrival seed only. The authoritative per-session value rides the
+    // `session/new` / `session/load` response, but `/loop` can be reached from
+    // the session-less dashboard and from a session whose response has not
+    // landed yet; both need an answer now, and this is the same resolver the
+    // shell runs at spawn, so the seed agrees with the flag as it stands today.
+    app.scheduler_background_loops_seed =
+        xai_grok_shell::util::config::resolve_scheduler_background_loops(
+            remote_settings
+                .as_ref()
+                .and_then(|s| s.scheduler_background_loops),
+        );
+
     app.usage_billing_redirect_url = remote_settings
         .as_ref()
         .and_then(|s| s.usage_billing_redirect_url.clone());
@@ -1132,7 +1163,9 @@ pub(crate) async fn run(
     }
 
     {
-        use xai_grok_shell::util::config::{resolve_announcements, resolve_tips};
+        use xai_grok_shell::util::config::{
+            resolve_announcements, resolve_slash_command_tags, resolve_tips,
+        };
 
         let remote_announcements = remote_settings
             .as_ref()
@@ -1163,6 +1196,15 @@ pub(crate) async fn run(
             let grok_home = xai_grok_tools::util::grok_home::grok_home();
             app.tip = xai_grok_shell::util::tips::pick_and_advance(&app.tips, &grok_home);
         }
+
+        // Slash-command dropdown tags: remote base, local [slash_command_tags]
+        // wins per key. Mutate the shared map in place so every adopter sees it.
+        let remote_slash_tags = remote_settings
+            .as_ref()
+            .and_then(|s| s.slash_command_tags.as_ref());
+        let empty_toml = toml::Value::Table(Default::default());
+        let tags_config = effective_config.as_ref().unwrap_or(&empty_toml);
+        *app.command_tags.borrow_mut() = resolve_slash_command_tags(tags_config, remote_slash_tags);
     }
 
     let hints = xai_grok_shell::util::config::resolve_hints(
@@ -1171,7 +1213,6 @@ pub(crate) async fn run(
         user_config.as_ref(),
         managed_config.as_ref(),
     );
-    app.project_picker_disabled = hints.project_picker_disabled;
     // Per-tip contextual hints resolve from `[ui.contextual_hints]` (loaded into
     // `app.current_ui` further below) + the remote tier; the resolve + prompt
     // propagation happen after `current_ui` is hydrated.
@@ -1328,6 +1369,13 @@ pub(crate) async fn run(
         app.voice_config.language =
             crate::settings::canonical_voice_stt_language(Some(pref)).to_string();
     }
+    // Seed the Voice shortcut gate's process-global mirror for key-routing and
+    // view code without an `AppView`; the chord intercept reads `current_ui`
+    // live and the settings setter updates both.
+    crate::app::VOICE_KEYBIND_ENABLED.store(
+        app.current_ui.voice_keybind_enabled.unwrap_or(true),
+        std::sync::atomic::Ordering::Release,
+    );
     // Resolve the per-tip contextual hints now that `current_ui` is hydrated and
     // propagate the prompt-relevant tips to any agents built at startup. New
     // agents adopt the gates at creation; settings toggles re-apply at runtime.
@@ -1390,6 +1438,8 @@ pub(crate) async fn run(
 
     // Fire-and-forget XTVERSION query; must sit immediately before the input
     // reader thread is spawned so no earlier stdin consumer eats the reply.
+    // DA2 shares that constraint but runs earlier, in `init_terminal`, so its
+    // version is already resolved when the startup telemetry above is emitted.
     crate::terminal::xtversion::probe_at_startup();
 
     // Read terminal events on a dedicated thread and forward them over an mpsc
@@ -1573,12 +1623,19 @@ pub(crate) async fn run(
     // chokepoints self-gate when auth + folder trust is closed.
     use crate::app::session_startup::MaterializedStartup;
     let startup_action = match &materialized {
-        MaterializedStartup::Resume { session_id, .. } if args.worktree.is_some() => {
+        MaterializedStartup::Resume {
+            session_id,
+            deferred_local_miss,
+            ..
+        } if args.worktree.is_some() => {
             tracing::info!(
                 session_id,
                 restore_code = ?app.restore_code,
                 "RESTORE_CODE_DEBUG: worktree+resume path taken"
             );
+            // Materialization-time provenance for the worktree failure hint;
+            // the effect matches it against the exact deferred target.
+            app.resume_local_miss = deferred_local_miss.then(|| session_id.clone());
             Some(Action::NewWorktreeSession {
                 load_session_id: Some(session_id.clone()),
                 label: args.worktree.as_ref().filter(|s| !s.is_empty()).cloned(),
@@ -2546,6 +2603,10 @@ pub(crate) async fn run(
                                                     effects::parse_session_load_running_prompt_id(
                                                         resp.meta.as_ref(),
                                                     ),
+                                                scheduler_background_loops:
+                                                    effects::parse_session_scheduler_background_loops(
+                                                        resp.meta.as_ref(),
+                                                    ),
                                             });
                                         }
                                         Err(e) => {
@@ -2556,6 +2617,7 @@ pub(crate) async fn run(
                                                 agent_id,
                                                 success: false,
                                                 running_prompt_id: None,
+                                                scheduler_background_loops: None,
                                             });
                                         }
                                     }
@@ -2631,7 +2693,12 @@ pub(crate) async fn run(
                 let mut loads: std::collections::HashMap<_, _> = outcome
                     .loads
                     .into_iter()
-                    .map(|l| (l.agent_id, (l.success, l.running_prompt_id)))
+                    .map(|l| {
+                        (
+                            l.agent_id,
+                            (l.success, l.running_prompt_id, l.scheduler_background_loops),
+                        )
+                    })
                     .collect();
                 // Resolved BEFORE the finalize loop drains `loads` via `remove`
                 // (see `reconnect_restore_outcome`).
@@ -2647,8 +2714,14 @@ pub(crate) async fn run(
                 );
                 restore_dashboard_peek_before_reload(&mut app.dashboard, &mut app.agents);
                 for id in &pending.agent_ids {
-                    let (ok, running_prompt_id) = loads.remove(id).unwrap_or((false, None));
+                    let (ok, running_prompt_id, scheduler_background_loops) =
+                        loads.remove(id).unwrap_or((false, None, None));
                     if let Some(agent) = app.agents.get_mut(id) {
+                        // The reloaded actor re-pinned the fire mode; a failed
+                        // load leaves the previous value rather than guessing.
+                        if let Some(mode) = scheduler_background_loops {
+                            agent.scheduler_background_loops = Some(mode);
+                        }
                         agent.finalize_reload_and_maybe_adopt(
                             pending.generation,
                             ok,
@@ -3106,15 +3179,22 @@ async fn drain_and_process(
         }
         // Voice capture chord (Ctrl+Space or F8), handled here before normal
         // routing so the release reaches us and the key never lands as text.
-        // Hold-to-talk under Kitty (press records, release stops), else tap
-        // toggle. A release is only ours when a hold session owns it, so a bare
-        // Space release (Ctrl lifted first) stops hold-to-talk without eating
-        // every Space release during normal typing.
+        // Hold-to-talk where releases are reported (press records, release
+        // stops), else tap toggle. A release is only ours when a hold session
+        // owns it, so a bare Space release (Ctrl lifted first) stops
+        // hold-to-talk without eating every Space release during normal typing.
+        // `[ui].voice_keybind_enabled` (read live, like `voice_capture_mode`)
+        // silences chord presses without touching `/voice` — see
+        // `voice_chord_claims_event` for the exact press/release/hold gating.
         if let Event::Key(ke) = ev
             && app.voice_mode_enabled
             && xai_grok_voice::AUDIO_SUPPORTED
             && is_voice_chord(ke)
-            && (ke.kind != KeyEventKind::Release || app.voice_hold_owned())
+            && voice_chord_claims_event(
+                ke.kind,
+                app.current_ui.voice_keybind_enabled.unwrap_or(true),
+                app.voice_hold_owned(),
+            )
         {
             // Hold-to-talk only when selected AND the terminal reports key
             // releases (Kitty protocol); otherwise fall back to a tap toggle.
@@ -3123,7 +3203,7 @@ async fn drain_and_process(
             ) == "hold";
             let action = voice_chord_action(
                 hold_mode,
-                crate::app::kitty_flags_pushed(),
+                crate::app::kitty_releases_reported(),
                 ke.kind,
                 app.voice_listening(),
                 app.voice_hold_owned(),
@@ -3339,19 +3419,18 @@ fn is_pasteable_key_event(ev: &Event) -> bool {
 
 /// Map a voice-chord key event to its action (pure, so it's unit-testable).
 ///
-/// Hold mode on Kitty is press-to-record / release-to-stop, but only a
-/// hold-*owned* session stops on release; a `/voice`/toggle session (not
-/// hold-owned) has no release of its own, so a press toggles it off. Elsewhere
-/// it's a tap toggle.
+/// Hold mode is press-to-record / release-to-stop, but only a hold-*owned*
+/// session stops on release; a `/voice`/toggle session (not hold-owned) has no
+/// release of its own, so a press toggles it off. Elsewhere it's a tap toggle.
 fn voice_chord_action(
     hold_mode: bool,
-    kitty: bool,
+    releases_reported: bool,
     kind: KeyEventKind,
     listening: bool,
     hold_owned: bool,
 ) -> Option<crate::app::actions::Action> {
     use crate::app::actions::Action;
-    if hold_mode && kitty {
+    if hold_mode && releases_reported {
         match kind {
             KeyEventKind::Press if !listening => Some(Action::EnableVoiceMode),
             KeyEventKind::Press if !hold_owned => Some(Action::VoiceToggle),
@@ -3363,6 +3442,22 @@ fn voice_chord_action(
     } else {
         None
     }
+}
+
+/// Whether the event-loop intercept claims a voice-chord key event (pure for
+/// unit tests).
+///
+/// An active hold session owns its chord events end-to-end regardless of the
+/// Voice shortcut setting — its release only ever stops capture, so flipping
+/// the setting off mid-hold must not orphan it and wedge the mic open.
+/// Outside a hold, a bare release is never ours (normal typing) and a press
+/// honors the setting; an unclaimed press falls through to normal routing,
+/// where `ActionId::VoiceToggle` resolution is gated on the same setting.
+fn voice_chord_claims_event(kind: KeyEventKind, keybind_enabled: bool, hold_owned: bool) -> bool {
+    if hold_owned {
+        return true;
+    }
+    kind != KeyEventKind::Release && keybind_enabled
 }
 
 /// The voice-capture chord: **Ctrl+Space** or **F8**. A press needs the exact
@@ -3560,14 +3655,72 @@ fn merge_paste_fragments(events: Vec<TimedInputEvent>) -> Vec<TimedInputEvent> {
     result
 }
 
-/// Spawn effects into the task set. Returns `true` if the app should quit.
-fn process_effects(
-    effs: Vec<super::actions::Effect>,
-    tasks: &mut JoinSet<TaskResult>,
-    app: &mut AppView,
-    progress_tx: &tokio::sync::mpsc::UnboundedSender<effects::RestoreProgressMsg>,
+/// True when this batch should consume the welcome local-workspace one-shot.
+#[cfg(feature = "local-workspace")]
+pub(crate) fn welcome_oneshot_applies_to_effects(effs: &[super::actions::Effect]) -> bool {
+    use super::actions::Effect;
+    effs.iter().any(|e| {
+        matches!(
+            e,
+            Effect::CreateSession { .. } | Effect::CreateWorktreeSession { .. }
+        )
+    })
+}
+
+/// Conversation `LoadSession` must never inherit process-wide local stamp.
+#[cfg(feature = "local-workspace")]
+fn conversation_load_in_effects(effs: &[super::actions::Effect]) -> bool {
+    use super::actions::Effect;
+    effs.iter().any(|e| {
+        matches!(
+            e,
+            Effect::LoadSession {
+                chat_kind: true,
+                ..
+            }
+        )
+    })
+}
+
+/// Apply history bypass (`chat_mode = false`) for load/restore/worktree-create.
+#[cfg(feature = "local-workspace")]
+pub(crate) fn welcome_history_build_bypass_applies(
+    effs: &[super::actions::Effect],
+    flag: bool,
 ) -> bool {
-    let flags = effects::SessionFlags {
+    use super::actions::Effect;
+    flag && effs.iter().any(|e| {
+        matches!(
+            e,
+            Effect::LoadSession { .. }
+                | Effect::RestoreAndLoadSession { .. }
+                | Effect::CreateWorktreeSession { .. }
+        )
+    })
+}
+
+/// Whether this batch should clear the welcome history bypass flag.
+#[cfg(feature = "local-workspace")]
+pub(crate) fn welcome_history_build_bypass_consume(
+    effs: &[super::actions::Effect],
+    flag: bool,
+) -> bool {
+    use super::actions::Effect;
+    flag && effs.iter().any(|e| {
+        matches!(
+            e,
+            Effect::LoadSession { .. } | Effect::CreateWorktreeSession { .. }
+        )
+    })
+}
+
+/// Shared [`SessionFlags`] builder (interactive loop + leader-cluster).
+pub(crate) fn session_flags_for_effects(
+    app: &mut AppView,
+    #[cfg_attr(not(feature = "local-workspace"), allow(unused_variables))]
+    effs: &[super::actions::Effect],
+) -> effects::SessionFlags {
+    effects::SessionFlags {
         plan_mode: app.plan_mode,
         subagents: app.subagents,
         ask_user: app.ask_user,
@@ -3578,10 +3731,51 @@ fn process_effects(
             app.default_yolo,
             matches!(app.current_ui.permission_mode.as_deref(), Some("auto")),
         ),
-        chat_mode: app.chat_mode,
+        chat_mode: {
+            #[cfg(feature = "local-workspace")]
+            {
+                if welcome_history_build_bypass_applies(effs, app.welcome_history_load_as_build) {
+                    if welcome_history_build_bypass_consume(effs, app.welcome_history_load_as_build)
+                    {
+                        app.welcome_history_load_as_build = false;
+                    }
+                    false
+                } else {
+                    app.chat_mode
+                }
+            }
+            #[cfg(not(feature = "local-workspace"))]
+            {
+                app.chat_mode
+            }
+        },
+        #[cfg(feature = "local-workspace")]
+        local_workspace: {
+            if conversation_load_in_effects(effs) {
+                None // conversation resume is sandbox/gateway-owned
+            } else if welcome_oneshot_applies_to_effects(effs) {
+                match app.welcome_session_local_workspace.take() {
+                    Some(one_shot) => one_shot,
+                    None => crate::app::session_startup::active_local_workspace().unwrap_or(None),
+                }
+            } else {
+                crate::app::session_startup::active_local_workspace().unwrap_or(None)
+            }
+        },
         screen_mode_label: Some(app.screen_mode.meta_label()),
         is_api_key_auth: app.is_api_key_auth,
-    };
+        resume_local_miss: app.resume_local_miss.clone(),
+    }
+}
+
+/// Spawn effects into the task set. Returns `true` if the app should quit.
+fn process_effects(
+    effs: Vec<super::actions::Effect>,
+    tasks: &mut JoinSet<TaskResult>,
+    app: &mut AppView,
+    progress_tx: &tokio::sync::mpsc::UnboundedSender<effects::RestoreProgressMsg>,
+) -> bool {
+    let flags = session_flags_for_effects(app, &effs);
     for eff in effs {
         let (quit, meta) = effects::execute(eff, tasks, &app.acp_tx, &app.cwd, &flags, progress_tx);
         // Install auth abort handle if the current auth state still matches.
@@ -3618,6 +3812,79 @@ fn process_effects(
 mod tests {
     use super::*;
     use crossterm::event::{KeyEvent, KeyEventState};
+
+    #[cfg(feature = "local-workspace")]
+    #[test]
+    fn welcome_oneshot_applies_to_create_worktree_session() {
+        use crate::app::actions::Effect;
+        use crate::app::agent::AgentId;
+        let worktree = Effect::CreateWorktreeSession {
+            agent_id: AgentId(0),
+            load_session_id: None,
+            label: None,
+            git_ref: None,
+            model_id: None,
+            preferred_session_id: None,
+            chat_kind: false,
+        };
+        assert!(welcome_oneshot_applies_to_effects(std::slice::from_ref(
+            &worktree
+        )));
+        assert!(!welcome_oneshot_applies_to_effects(&[]));
+        assert!(!welcome_oneshot_applies_to_effects(&[Effect::Quit]));
+    }
+
+    #[cfg(feature = "local-workspace")]
+    #[test]
+    fn conversation_load_is_not_welcome_oneshot_or_local_stamp() {
+        use crate::app::actions::Effect;
+        use crate::app::agent::AgentId;
+        let load = Effect::LoadSession {
+            agent_id: AgentId(0),
+            session_id: "c1".into(),
+            session_cwd: None,
+            chat_kind: true,
+        };
+        assert!(!welcome_oneshot_applies_to_effects(std::slice::from_ref(
+            &load
+        )));
+        assert!(conversation_load_in_effects(std::slice::from_ref(&load)));
+        let build_load = Effect::LoadSession {
+            agent_id: AgentId(0),
+            session_id: "b1".into(),
+            session_cwd: None,
+            chat_kind: false,
+        };
+        assert!(!conversation_load_in_effects(std::slice::from_ref(
+            &build_load
+        )));
+    }
+
+    #[cfg(feature = "local-workspace")]
+    #[test]
+    fn session_flags_consume_history_bypass_and_strip_conversation_stamp() {
+        use crate::app::actions::Effect;
+        use crate::app::agent::AgentId;
+        let mut app = crate::app::app_view::tests::test_app();
+        app.chat_mode = true;
+        app.welcome_history_load_as_build = true;
+        let load = Effect::LoadSession {
+            agent_id: AgentId(0),
+            session_id: "c1".into(),
+            session_cwd: None,
+            chat_kind: true,
+        };
+        let flags = session_flags_for_effects(&mut app, std::slice::from_ref(&load));
+        assert!(!flags.chat_mode, "history bypass must clear chat_mode");
+        assert!(
+            !app.welcome_history_load_as_build,
+            "LoadSession consumes the bypass"
+        );
+        assert!(
+            flags.local_workspace.is_none(),
+            "conversation load must strip local stamp"
+        );
+    }
 
     #[test]
     fn tty_suspend_arm_stops_same_batch_before_later_ownership_changes() {
@@ -3666,8 +3933,8 @@ mod tests {
     #[test]
     fn voice_chord_action_cases() {
         use crate::app::actions::Action;
-        // (hold_mode, kitty, kind, listening, hold_owned) -> action tag, with the
-        // toggle-stop case being a past regression.
+        // (hold_mode, releases_reported, kind, listening, hold_owned) -> action
+        // tag, with the toggle-stop case being a past regression.
         let press = KeyEventKind::Press;
         let release = KeyEventKind::Release;
         let tag = |a: Option<Action>| match a {
@@ -3678,22 +3945,57 @@ mod tests {
             _ => "other",
         };
         let cases = [
-            // hold+Kitty: press idle starts; release stops; press on a hold-owned
-            // session waits; press on a non-hold (/voice/toggle) session toggles off.
+            // hold + releases: press idle starts; release stops; press on a
+            // hold-owned session waits; press on a non-hold (/voice/toggle)
+            // session toggles off.
             ((true, true, press, false, false), "start"),
             ((true, true, release, true, true), "stop"),
             ((true, true, press, true, true), "none"),
             ((true, true, press, true, false), "toggle"),
-            // Non-hold (toggle mode or no Kitty releases): press toggles, release noops.
+            // Non-hold (toggle mode or no reported releases): press toggles,
+            // release noops.
             ((false, false, press, false, false), "toggle"),
             ((false, false, release, true, false), "none"),
             ((true, false, release, true, false), "none"),
         ];
-        for ((hold, kitty, kind, listening, owned), want) in cases {
+        for ((hold, releases, kind, listening, owned), want) in cases {
             assert_eq!(
-                tag(voice_chord_action(hold, kitty, kind, listening, owned)),
+                tag(voice_chord_action(hold, releases, kind, listening, owned)),
                 want,
-                "voice_chord_action({hold},{kitty},{kind:?},{listening},{owned})"
+                "voice_chord_action({hold},{releases},{kind:?},{listening},{owned})"
+            );
+        }
+    }
+
+    /// Hold-owned events are claimed even with the setting off (a dropped
+    /// release would wedge the mic open — past regression); otherwise presses
+    /// honor the setting and bare releases are never claimed.
+    #[test]
+    fn voice_chord_claims_event_cases() {
+        let press = KeyEventKind::Press;
+        let repeat = KeyEventKind::Repeat;
+        let release = KeyEventKind::Release;
+        // (kind, keybind_enabled, hold_owned) -> claimed
+        let cases = [
+            // Hold-owned: everything claimed, setting on or off.
+            ((release, false, true), true),
+            ((release, true, true), true),
+            ((press, false, true), true),
+            ((repeat, false, true), true),
+            // No hold: press/repeat follow the setting.
+            ((press, true, false), true),
+            ((press, false, false), false),
+            ((repeat, true, false), true),
+            ((repeat, false, false), false),
+            // No hold: a bare release is never ours (normal typing).
+            ((release, true, false), false),
+            ((release, false, false), false),
+        ];
+        for ((kind, enabled, owned), want) in cases {
+            assert_eq!(
+                voice_chord_claims_event(kind, enabled, owned),
+                want,
+                "voice_chord_claims_event({kind:?},{enabled},{owned})"
             );
         }
     }
@@ -3826,8 +4128,8 @@ mod tests {
         let active = AgentId(0);
         let background = AgentId(1);
         let mut loads = std::collections::HashMap::new();
-        loads.insert(active, (true, None));
-        loads.insert(background, (false, None));
+        loads.insert(active, (true, None, None));
+        loads.insert(background, (false, None, None));
         let pending = vec![active, background];
 
         let (all_restored, active_restored) =
@@ -3850,8 +4152,8 @@ mod tests {
         let active = AgentId(0);
         let background = AgentId(1);
         let mut loads = std::collections::HashMap::new();
-        loads.insert(active, (false, None));
-        loads.insert(background, (true, None));
+        loads.insert(active, (false, None, None));
+        loads.insert(background, (true, None, None));
         let pending = vec![active, background];
 
         let (all_restored, active_restored) =
@@ -3870,7 +4172,7 @@ mod tests {
         use super::super::agent::AgentId;
         let active = AgentId(0);
         let mut loads = std::collections::HashMap::new();
-        loads.insert(active, (true, None));
+        loads.insert(active, (true, None, None));
         let pending = vec![active];
 
         let (all_restored, active_restored) =
@@ -3900,7 +4202,7 @@ mod tests {
         use super::super::agent::AgentId;
         let background = AgentId(1);
         let mut loads = std::collections::HashMap::new();
-        loads.insert(background, (true, None));
+        loads.insert(background, (true, None, None));
         let pending = vec![background];
 
         let (all_restored, active_restored) =

@@ -42,8 +42,8 @@ pub mod notifications;
 #[allow(unused_imports, unused_macros)]
 pub mod obf;
 pub mod plugin_cmd;
-pub mod project_picker;
 pub mod pty_wrap;
+pub mod recent_dirs;
 pub mod scrollback;
 pub mod search;
 pub mod sessions_cmd;
@@ -52,6 +52,7 @@ pub mod share_cmd;
 pub mod slash;
 pub mod startup;
 pub mod tips;
+pub mod tutorial_docs;
 pub mod wrap_clipboard_image;
 pub mod wrap_cmd;
 pub(crate) mod wrap_filter;

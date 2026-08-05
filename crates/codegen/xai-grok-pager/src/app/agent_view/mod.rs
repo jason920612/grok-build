@@ -272,6 +272,60 @@ pub struct HitArea {
     pub rect: Option<Rect>,
     pub hovered: bool,
 }
+/// Privacy upsell banner state on the agent view: whether the banner owns
+/// the banner slot this frame (`active`, set at draw start like
+/// `session_banner_active`; persists until acted on, so it is a tip
+/// occluder AND a tip-tick freezer) plus the four click targets.
+#[derive(Debug, Default)]
+pub struct PrivacyBannerState {
+    pub(crate) active: bool,
+    /// `[Opt in]` (opt in; ack only after ACP success).
+    pub(crate) hit_opt_in: HitArea,
+    /// `[Opt out]` (ack now; record the decline).
+    pub(crate) hit_opt_out: HitArea,
+    /// "Terms" link (opens the terms of service).
+    pub(crate) hit_terms: HitArea,
+    /// "Privacy Policy" link (opens the privacy policy).
+    pub(crate) hit_policy: HitArea,
+}
+impl PrivacyBannerState {
+    /// Drop all click targets (slot not painted this frame).
+    pub fn clear_hits(&mut self) {
+        self.hit_opt_in.clear();
+        self.hit_opt_out.clear();
+        self.hit_terms.clear();
+        self.hit_policy.clear();
+    }
+}
+/// Banner-slot inputs to [`AgentView::draw`]. Slot precedence is computed
+/// by the caller (`AppView::draw`).
+pub struct BannerSlotParams<'a> {
+    /// Reserved slot height (0 = no slot this frame).
+    pub(crate) height: u16,
+    pub(crate) announcements: &'a [xai_grok_announcements::RemoteAnnouncement],
+    pub(crate) hidden_ids: &'a std::collections::BTreeSet<String>,
+    /// Privacy upsell banner owns the slot (highest banner precedence
+    /// below critical announcements; gated by the caller).
+    pub(crate) privacy_banner: bool,
+    /// Last mouse position, for mouse-pos-driven hover styling.
+    pub(crate) mouse_pos: Option<(u16, u16)>,
+    /// Session tip, only when it owns the slot.
+    pub(crate) tip: Option<&'a str>,
+}
+impl BannerSlotParams<'static> {
+    /// No banner slot this frame.
+    pub fn none() -> Self {
+        static EMPTY_IDS: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+        Self {
+            height: 0,
+            announcements: &[],
+            hidden_ids: &EMPTY_IDS,
+            privacy_banner: false,
+            mouse_pos: None,
+            tip: None,
+        }
+    }
+}
 impl HitArea {
     /// Update hover state for a mouse position. Returns `true` if changed.
     pub fn update_hover(&mut self, col: u16, row: u16) -> bool {
@@ -686,35 +740,6 @@ pub(crate) enum AgentDeferredSend {
     /// Ctrl+Enter — a mid-turn interjection.
     Interject,
 }
-/// How the parked-marker slot was consumed. Both variants carry the turn's
-/// prompt id and both keep the parked (idle) chrome. `Rendered` markers are
-/// one-per-park-episode — a re-park after new parent output (epoch bump)
-/// pushes a fresh one (see `maybe_push_parked_marker`); `Forgone` (an
-/// interjection continued the parked turn) is final — a later "Worked for"
-/// line would land below the interjected message, flipping the transcript.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum ParkedMarkerSlot {
-    /// A "Worked for X" marker block was pushed.
-    Rendered {
-        prompt_id: String,
-        /// The parent-output boundary at push time: chips/completions landing
-        /// under the marker don't bump it, so a matching epoch means "same
-        /// park episode — don't re-push".
-        agent_output_epoch: u64,
-    },
-    /// The marker was forgone: an interjection continued the parked turn.
-    Forgone(String),
-}
-impl ParkedMarkerSlot {
-    /// The prompt id the slot was consumed for, regardless of variant.
-    pub(crate) fn prompt_id(&self) -> &str {
-        match self {
-            ParkedMarkerSlot::Rendered { prompt_id, .. } | ParkedMarkerSlot::Forgone(prompt_id) => {
-                prompt_id
-            }
-        }
-    }
-}
 pub struct AgentView {
     pub session: AgentSession,
     pub(crate) session_binding_epoch: u32,
@@ -797,6 +822,10 @@ pub struct AgentView {
     /// turn that already ended (otherwise the viewer re-strands on "Waiting…").
     /// Reset at the start of every load so it never leaks across loads.
     pub(crate) replayed_terminal_prompts: HashSet<String>,
+    /// Wake prompt id whose failure marker already rendered — a re-delivered
+    /// errored wake terminal must not stack a second "Turn failed" row (the
+    /// output-epoch dedupe only covers chatty closes; failures bypass it).
+    pub(crate) failed_wake_marker_for: Option<String>,
     pub active_pane: AgentPane,
     /// Current mode of the prompt widget (normal vs editing a queued prompt).
     pub prompt_mode: PromptMode,
@@ -852,6 +881,12 @@ pub struct AgentView {
     /// Unlike `chat_kind`, stays `false` for a `/chat` one-shot session in
     /// a Build process, whose picker still lists local sessions.
     pub app_chat_mode: bool,
+    /// Durable workspace mode for the in-session status indicator (`--chat`).
+    #[cfg(feature = "local-workspace")]
+    pub workspace_mode: crate::views::welcome::WelcomeWorkspaceMode,
+    /// True when CLI/env locked local workspace at startup for this session.
+    #[cfg(feature = "local-workspace")]
+    pub workspace_mode_cli_locked: bool,
     /// Mocked credit balance for the status bar indicator.
     pub credit_balance: Option<crate::views::credit_bar::CreditBalance>,
     /// Auto top-up rule paired with `credit_balance` for the prompt warning.
@@ -865,10 +900,6 @@ pub struct AgentView {
     pub cleared_workflow_runs: std::collections::HashSet<String>,
     pub show_workflows: bool,
     pub workflows_view: crate::views::workflows::WorkflowsViewState,
-    /// The consumed parked-wait marker slot for the current turn, if any.
-    /// Keyed by prompt id: a new turn naturally invalidates the slot with no
-    /// explicit clear site. See [`ParkedMarkerSlot`].
-    pub(crate) parked_wait_marker_for: Option<ParkedMarkerSlot>,
     /// Live `stop`/`stop_failure` hook runs held for the turn's terminal
     /// marker (driver order: the hooks arrive before the `PromptResponse`
     /// that pushes it). Consumed or flushed by `push_turn_terminal_marker`;
@@ -887,6 +918,10 @@ pub struct AgentView {
     /// UTC ms when the current turn started (`turnStartMs` from notification meta).
     /// Used for turn elapsed display.
     pub turn_start_ms: Option<i64>,
+    /// Prompt id the stored `turn_start_ms` belongs to (stamped together from
+    /// the same delta meta): wake markers may only claim an elapsed whose
+    /// anchor is provably their own turn's.
+    pub turn_start_ms_prompt: Option<String>,
     /// Local wall-clock time when the current turn started.
     /// Set by `maybe_drain_queue` when a prompt is sent. Used to compute
     /// elapsed time for "Worked for Xm Ys" system messages.
@@ -896,6 +931,11 @@ pub struct AgentView {
     /// Accumulated duration the turn timer was paused (while the user was
     /// answering questions via `AskUserQuestion`). Reset when the turn ends.
     pub turn_paused_duration: std::time::Duration,
+    /// Wall-clock twin of `turn_paused_duration`: the same pauses measured on
+    /// the wall clock, which keeps counting through OS suspend while `Instant`
+    /// does not. Netted against the wall-anchored turn span so a suspend
+    /// during an open question isn't reported as worked time.
+    pub turn_paused_wall: std::time::Duration,
     /// IDs of interjections this client sent and already rendered locally
     /// (optimistic echo). The shell broadcasts `x.ai/session/interjection` to
     /// every attached pane; when our own broadcast echoes back carrying an id
@@ -1053,14 +1093,25 @@ pub struct AgentView {
     pub hit_plan_button: HitArea,
     pub hit_plan_approval_status: HitArea,
     pub hit_follow_indicator: HitArea,
+    /// ▲ jump-to-response-top indicator in the sticky header's gap row
+    /// (click snaps the answer's first line to the top, same as `K`).
+    pub hit_response_top_indicator: HitArea,
     /// CWD / worktree path in the status bar (click to copy).
     pub hit_cwd: HitArea,
     /// Cancel button in turn status line (`[stop]`).
     pub hit_cancel_button: HitArea,
+    /// Still-running watcher cue on the turn-status row (click opens the
+    /// tasks pane, same as `Ctrl+G`).
+    pub hit_watching_cue: HitArea,
+    /// One-time Ctrl+G toast already fired for a watching-cue click.
+    pub(crate) watching_cue_toast_shown: bool,
     /// `[hide]` button on the announcement banner (click == `/announcements hide`).
     pub hit_announcement_hide: HitArea,
     /// `[label]` CTA button on the promo banner row (click opens its link).
     pub hit_announcement_cta: HitArea,
+    /// Privacy upsell banner state: slot ownership + click targets
+    /// (packaged like [`Self::plugin_cta`]).
+    pub privacy_banner: PrivacyBannerState,
     /// `[label]` upgrade CTA appended after the cwd path in the status bar
     /// (click opens its link; nulled under dropdowns / occluders like the
     /// banner CTA).
@@ -1278,6 +1329,10 @@ pub struct AgentView {
     pub permission_stashed_prompt: Option<StashedPrompt>,
     /// Scrollback focus stolen for a permission prompt; restored when the queue empties.
     pub permission_stashed_pane: Option<AgentPane>,
+    /// Free-form "Always allow" pattern editor buffer for the front request.
+    /// `Some` only in `PermissionFocus::PatternEdit`; cleared when the request
+    /// resolves or the edit is cancelled.
+    pub permission_pattern_edit: Option<crate::views::permission_view::PatternEditState>,
     /// Active plan approval view (from `exit_plan_mode` ext_method). When `Some`,
     /// the prompt area shows the plan approval overlay and input is modal.
     pub(crate) plan_approval_view: Option<PlanApprovalViewState>,
@@ -1351,8 +1406,19 @@ pub struct AgentView {
     /// Whether the `/share` slash command is available (mirrors
     /// `AppView::sharing_enabled`). Used to gate palette entries.
     pub sharing_enabled: bool,
+    /// Whether THIS session's scheduled fires run as detached background
+    /// subagents, as resolved by the shell when the session's actor spawned and
+    /// delivered on the `session/new` / `session/load` response. `/loop` reads
+    /// it to describe the runtime a fire will get. `None` until that response
+    /// lands (or against a shell that predates the key), where readers fall
+    /// back to `AppView::scheduler_background_loops_seed`. Deliberately NOT
+    /// refreshed by `x.ai/settings/update`: the fire side is pinned for the
+    /// session's lifetime, so a live mirror would drift out of agreement.
+    pub scheduler_background_loops: Option<bool>,
     /// Mirrors `AppView::usage_visible` (credit warning + `/usage manage`).
     pub billing_surface_visible: bool,
+    /// Whether `/usage` is offered. Mirrors `!AppView::has_external_auth_provider`.
+    pub usage_command_visible: bool,
     /// Input flight recorder — rolling buffer of recent key events.
     /// Dumped to file via Esc→d combo for debugging.
     pub(crate) input_log: crate::input_log::InputRingBuffer,
@@ -1597,22 +1663,6 @@ fn translate_local_submit(
     skipped: bool,
 ) -> InputOutcome {
     use crate::views::question_view::{LocalQuestionKind, QuestionSelection};
-    if let LocalQuestionKind::ProjectSelect {
-        resolved_paths,
-        original_cwd,
-        stashed_prompt,
-        dont_ask_index,
-    } = kind
-    {
-        return translate_project_select(
-            qv,
-            resolved_paths,
-            original_cwd,
-            stashed_prompt,
-            dont_ask_index,
-            skipped,
-        );
-    }
     if skipped {
         return InputOutcome::Changed;
     }
@@ -1687,82 +1737,12 @@ fn translate_local_submit(
                 InputOutcome::Action(Action::DoctorFixCancelled(target))
             }
         }
-        LocalQuestionKind::ProjectSelect { .. } => unreachable!(),
+        LocalQuestionKind::DeleteCurrentSession => {
+            InputOutcome::Action(Action::DeleteCurrentSessionAnswered {
+                confirmed: *idx == 0,
+            })
+        }
     }
-}
-fn translate_project_select(
-    qv: &crate::views::question_view::QuestionViewState,
-    resolved_paths: Vec<std::path::PathBuf>,
-    original_cwd: std::path::PathBuf,
-    stashed_prompt: String,
-    dont_ask_index: usize,
-    skipped: bool,
-) -> InputOutcome {
-    use crate::views::question_view::QuestionSelection;
-    use xai_grok_telemetry::events::{ProjectPickerOutcome, ProjectPickerSelected};
-    let project_dir_options = resolved_paths.len().saturating_sub(1);
-    let emit = |outcome: ProjectPickerOutcome| {
-        xai_grok_telemetry::session_ctx::log_event(ProjectPickerSelected {
-            outcome,
-            picked_project: outcome.picked_project(),
-            project_dir_options,
-        });
-    };
-    if skipped {
-        emit(ProjectPickerOutcome::Dismissed);
-        return InputOutcome::Action(Action::ProjectSelected {
-            path: original_cwd,
-            stashed_prompt,
-            disable_picker: false,
-        });
-    }
-    let freeform_path = qv
-        .per_question_freeform_selected
-        .first()
-        .copied()
-        .unwrap_or(false)
-        .then(|| qv.per_question_freeform.first())
-        .flatten()
-        .filter(|s| !s.trim().is_empty())
-        .map(|s| {
-            let expanded = shellexpand::tilde(s.trim());
-            std::path::PathBuf::from(expanded.as_ref())
-        });
-    if let Some(path) = freeform_path {
-        emit(ProjectPickerOutcome::CustomPath);
-        return InputOutcome::Action(Action::ProjectSelected {
-            path,
-            stashed_prompt,
-            disable_picker: false,
-        });
-    }
-    let selected_idx = qv.selections.first().and_then(|s| match s {
-        QuestionSelection::Single(Some(idx)) => Some(*idx),
-        _ => None,
-    });
-    if selected_idx == Some(dont_ask_index) {
-        emit(ProjectPickerOutcome::DontAskAgain);
-        return InputOutcome::Action(Action::ProjectSelected {
-            path: original_cwd,
-            stashed_prompt,
-            disable_picker: true,
-        });
-    }
-    let picked_recent =
-        matches!(selected_idx, Some(idx) if (1..resolved_paths.len()).contains(&idx));
-    emit(if picked_recent {
-        ProjectPickerOutcome::RecentProject
-    } else {
-        ProjectPickerOutcome::CurrentDir
-    });
-    let path = selected_idx
-        .and_then(|idx| resolved_paths.get(idx).cloned())
-        .unwrap_or(original_cwd);
-    InputOutcome::Action(Action::ProjectSelected {
-        path,
-        stashed_prompt,
-        disable_picker: false,
-    })
 }
 /// Convert an [`OverlayAction`] to an [`InputOutcome`].
 fn overlay_action_to_outcome(action: crate::views::overlay::OverlayAction) -> InputOutcome {
@@ -1968,6 +1948,10 @@ pub(super) fn apply_settings_outcome(
         }
         SettingsKeyOutcome::Action(a) => InputOutcome::Action(a),
         SettingsKeyOutcome::ActionPair(a, b) => InputOutcome::ActionPair(a, b),
+        SettingsKeyOutcome::ActionThenClose(a) => {
+            agent.active_modal = None;
+            InputOutcome::Action(a)
+        }
         SettingsKeyOutcome::Changed => InputOutcome::Changed,
         SettingsKeyOutcome::Unchanged => InputOutcome::Unchanged,
     }
@@ -2048,7 +2032,12 @@ fn resolve_action(action_id: Option<ActionId>) -> Option<InputOutcome> {
         ActionId::ToggleMultiline => return None,
         ActionId::InterjectPrompt => return None,
         ActionId::EnableVoiceMode => Action::EnableVoiceMode,
-        ActionId::VoiceToggle => Action::VoiceToggle,
+        ActionId::VoiceToggle => {
+            if !crate::app::voice_keybind_enabled() {
+                return None;
+            }
+            Action::VoiceToggle
+        }
         ActionId::ShortcutsHelp => return None,
         ActionId::OpenSettings => return None,
         ActionId::ToggleTodos
@@ -2358,15 +2347,17 @@ pub(crate) mod test_fixtures {
             child_updates_replayed: false,
         }
     }
-    /// Count of parked ("Worked for X") marker blocks in the agent's
-    /// scrollback.
-    pub fn count_parked(agent: &AgentView) -> usize {
+    /// Count of "Worked for X" (`TurnCompleted`) marker blocks in the
+    /// agent's scrollback.
+    pub fn count_turn_markers(agent: &AgentView) -> usize {
         use crate::scrollback::block::RenderBlock;
+        use crate::scrollback::blocks::SessionEvent;
         (0..agent.scrollback.len())
             .filter(|i| {
                 matches!(
                     agent.scrollback.get(*i).map(|e| &e.block),
-                    Some(RenderBlock::SessionEvent(b)) if b.parked
+                    Some(RenderBlock::SessionEvent(b))
+                        if matches!(b.event, SessionEvent::TurnCompleted { .. })
                 )
             })
             .count()
@@ -3413,6 +3404,25 @@ mod dropdown_chrome_tests {
                 );
             }
         }
+    }
+}
+#[cfg(test)]
+mod voice_keybind_gate_tests {
+    use super::*;
+    /// The per-pane chord route drops `VoiceToggle` while the Voice shortcut
+    /// setting is off (the event-loop intercept skips the chord in that state,
+    /// so this route is what would otherwise leak it through).
+    #[test]
+    fn resolve_action_honors_voice_keybind_gate() {
+        let prev = crate::app::voice_keybind_enabled();
+        crate::app::set_voice_keybind_enabled_for_test(false);
+        assert!(resolve_action(Some(ActionId::VoiceToggle)).is_none());
+        crate::app::set_voice_keybind_enabled_for_test(true);
+        assert!(matches!(
+            resolve_action(Some(ActionId::VoiceToggle)),
+            Some(InputOutcome::Action(Action::VoiceToggle))
+        ));
+        crate::app::set_voice_keybind_enabled_for_test(prev);
     }
 }
 #[cfg(test)]

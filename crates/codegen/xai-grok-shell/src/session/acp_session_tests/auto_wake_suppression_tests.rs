@@ -513,6 +513,9 @@ async fn genuine_user_start_consumes_deferred_completions_without_notification_t
                     block_waited: false,
                     explicitly_killed: false,
                     owner_session_id: None,
+                    description: None,
+                    is_backgrounded: false,
+                    output_total_bytes: 0,
                 },
                 Some("get_command_or_subagent_output"),
             );
@@ -1291,7 +1294,7 @@ async fn handle_bridge_tool_success_runs_consumed_completion_sweep() {
                     "tc-1",
                     "get_task_output",
                     "get_task_output",
-                    result,
+                    DrainedToolSuccess::new(result),
                     0,
                     "test-model",
                     &parsed_args,
@@ -1528,7 +1531,6 @@ async fn between_turn_drain_suppresses_reserved_subagents() {
                         *captured_task.lock().unwrap() = req.suppress_ids.clone();
                         let mk = |id: &str| SubagentCompletionSummary {
                             subagent_id: id.into(),
-                            owner_session_id: String::new(),
                             subagent_type: "general-purpose".into(),
                             description: format!("desc {id}"),
                             success: true,
@@ -1666,6 +1668,9 @@ fn completed_bash_task(id: &str) -> xai_grok_tools::computer::types::TaskSnapsho
         block_waited: false,
         explicitly_killed: false,
         owner_session_id: None,
+        description: None,
+        is_backgrounded: false,
+        output_total_bytes: 0,
     }
 }
 /// Real-actor coverage for the `SessionCommand::IsBusy` predicate

@@ -35,7 +35,7 @@ pub struct PersistenceContentChunk {
 }
 
 impl PersistenceContentChunk {
-    pub fn new(content_chunks: Vec<acp::ContentBlock>) -> Self {
+    pub(crate) fn new(content_chunks: Vec<acp::ContentBlock>) -> Self {
         Self { content_chunks }
     }
 }
@@ -73,6 +73,14 @@ pub struct BtwEntry {
     /// Error message if failed.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// Model-call attempts made (1 = no retry). Entries written before this
+    /// field existed deserialize as 1.
+    #[serde(default = "default_btw_attempts")]
+    pub attempts: u32,
+}
+
+fn default_btw_attempts() -> u32 {
+    1
 }
 
 // Local feedback persistence types
@@ -372,6 +380,11 @@ pub enum PersistenceMsg {
     /// Routed back through the persistence channel so the storage write
     /// stays sequential with other summary.json mutations.
     GeneratedTitle(String),
+    /// Enable remote writeback for a session created `Local` before remote
+    /// settings resolved (non-blocking startup); backfills its local history.
+    UpgradeToWriteback {
+        auth_manager: Arc<crate::auth::AuthManager>,
+    },
     Flush,
     /// Flush all pending writes, then signal the caller once the flush is complete.
     /// Unlike `Flush` (fire-and-forget), this is a **sync barrier**: the caller's
@@ -469,7 +482,7 @@ pub enum LocalSessionResolutionKind {
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct ResolvedLocalSession {
+pub(crate) struct ResolvedLocalSession {
     pub session_id: String,
     pub cwd: String,
     pub resolution_kind: LocalSessionResolutionKind,
@@ -482,7 +495,7 @@ pub struct ResolvedLocalSession {
 /// and previously-restored children.
 ///
 /// Returns `None` when no local match exists in any candidate.
-pub fn resolve_local_session_for_repo(
+pub(crate) fn resolve_local_session_for_repo(
     session_id: &str,
     candidate_cwds: &[&str],
 ) -> Option<ResolvedLocalSession> {
@@ -490,7 +503,7 @@ pub fn resolve_local_session_for_repo(
     resolve_local_session_for_repo_in_root(session_id, candidate_cwds, &sessions_root)
 }
 
-pub fn resolve_local_session_for_repo_in_root(
+pub(crate) fn resolve_local_session_for_repo_in_root(
     session_id: &str,
     candidate_cwds: &[&str],
     sessions_root: &Path,
@@ -600,7 +613,7 @@ pub fn resolve_local_session_any_cwd(session_id: &str) -> Option<String> {
         .flatten()
 }
 
-pub fn resolve_local_session_any_cwd_result(session_id: &str) -> io::Result<Option<String>> {
+pub(crate) fn resolve_local_session_any_cwd_result(session_id: &str) -> io::Result<Option<String>> {
     resolve_local_session_any_cwd_in_root(session_id, &grok_home().join("sessions"))
         .map_err(io::Error::other)
 }
@@ -651,7 +664,7 @@ fn session_exists_in_root(session_id: &str, sessions_root: &Path) -> bool {
 }
 
 /// Find and read a session summary given only its ID (scans all CWD directories).
-pub fn find_summary_by_session_id(session_id: &str) -> Option<Summary> {
+pub(crate) fn find_summary_by_session_id(session_id: &str) -> Option<Summary> {
     find_summary_by_session_id_in_root(session_id, &grok_home().join("sessions"))
 }
 
@@ -722,6 +735,30 @@ fn most_recent_local_summary_for_cwd_in_view(
     Ok(best)
 }
 
+/// Sync, local-only session summaries for `cwd` (hidden sessions filtered).
+/// For startup paths that must resolve a resume target before the
+/// irreversible OS sandbox is applied; async callers use [`list_summaries`].
+///
+/// Listing failures propagate so pre-sandbox callers can fail closed;
+/// individual unreadable summaries are skipped, matching the async path's
+/// tolerance for a single corrupt file.
+pub fn local_summaries_for_cwd_sync(cwd: &str) -> io::Result<Vec<Summary>> {
+    local_summaries_for_cwd_sync_in_root(cwd, &grok_home().join("sessions"))
+}
+
+fn local_summaries_for_cwd_sync_in_root(
+    cwd: &str,
+    sessions_root: &Path,
+) -> io::Result<Vec<Summary>> {
+    let view = storage_view(sessions_root).map_err(io::Error::other)?;
+    let dirs = view.session_dirs(Some(cwd)).map_err(io::Error::other)?;
+    Ok(dirs
+        .iter()
+        .filter_map(|dir| read_summary_from_dir(dir).ok())
+        .filter(|s| !s.is_hidden())
+        .collect())
+}
+
 /// Best-effort lookup of the sandbox profile persisted with a session that is
 /// about to be resumed, used at startup to restore the session's profile before
 /// the (irreversible) OS sandbox is applied.
@@ -774,7 +811,7 @@ fn resumed_session_sandbox_profile_in_root(
 /// Get file path for storing a large prompt.
 /// Creates the prompts subdirectory if it doesn't exist.
 /// Path format: `{session_dir}/prompts/prompt_{prompt_index}.txt`
-pub fn get_prompt_file_path(info: &Info, prompt_index: usize) -> PathBuf {
+pub(crate) fn get_prompt_file_path(info: &Info, prompt_index: usize) -> PathBuf {
     let prompts_dir = session_dir(info).join("prompts");
     std::fs::create_dir_all(&prompts_dir).ok();
     prompts_dir.join(format!("prompt_{}.txt", prompt_index))
@@ -917,7 +954,7 @@ pub struct Summary {
 }
 
 /// Current `grok_home` as a UTF-8 string, or `None` if the path isn't valid UTF-8.
-pub fn grok_home_string() -> Option<String> {
+pub(crate) fn grok_home_string() -> Option<String> {
     crate::util::grok_home::grok_home()
         .to_str()
         .map(String::from)
@@ -928,7 +965,7 @@ pub fn default_model_id() -> acp::ModelId {
 }
 
 impl Summary {
-    pub fn new(info: &Info, model_id: acp::ModelId) -> std::io::Result<Self> {
+    pub(crate) fn new(info: &Info, model_id: acp::ModelId) -> std::io::Result<Self> {
         let git_metadata =
             xai_grok_workspace::session::git::resolve_persisted_session_git_metadata_sync(
                 std::path::Path::new(&info.cwd),
@@ -1474,8 +1511,19 @@ pub struct PersistenceHandle {
     noop: bool,
 }
 
+fn actor_channel() -> (
+    PersistenceHandle,
+    mpsc::UnboundedReceiver<PersistenceMsg>,
+    mpsc::WeakUnboundedSender<PersistenceMsg>,
+) {
+    let (tx, rx) = mpsc::unbounded_channel::<PersistenceMsg>();
+    let weak = tx.downgrade();
+    let handle = PersistenceHandle { tx, noop: false };
+    (handle, rx, weak)
+}
+
 #[derive(Debug)]
-pub enum DurableAppendError {
+pub(crate) enum DurableAppendError {
     NotCommitted(io::Error),
     Committed(io::Error),
     AcknowledgementLost(io::Error),
@@ -1523,7 +1571,7 @@ impl PersistenceHandle {
     /// [`DurableAppendError::NotCommitted`] is safe to retry; [`DurableAppendError::Committed`]
     /// means the replay line landed; [`DurableAppendError::AcknowledgementLost`] has unknown status.
     /// No-op handles return `Unsupported`.
-    pub async fn append_update_durably(
+    pub(crate) async fn append_update_durably(
         &self,
         update: SessionUpdate,
     ) -> Result<(), DurableAppendError> {
@@ -1567,6 +1615,9 @@ struct SessionPersistence {
     pending_notification: Option<acp::SessionNotification>,
     rx: mpsc::UnboundedReceiver<PersistenceMsg>,
     remote_sync: Option<RemoteSync>,
+    /// True only for sessions created this run (not resumed); gates the
+    /// writeback backfill so a resumed, already-synced session isn't re-sent.
+    created_fresh: bool,
     /// WebSocket-based relay sync for real-time session sharing.
     /// This streams updates to the relay backend in addition to local persistence.
     relay_sync: Option<crate::relay::RelaySync>,
@@ -1686,6 +1737,53 @@ impl SessionPersistence {
         }
     }
 
+    /// Enable writeback for a session created `Local` before settings resolved:
+    /// build the sync and (for a fresh session) backfill its local-only history.
+    /// No-op once syncing, so a repeat upgrade is harmless.
+    async fn upgrade_to_writeback(&mut self, auth_manager: Arc<crate::auth::AuthManager>) {
+        if self.remote_sync.is_some() {
+            return;
+        }
+        // Flush the merge-pending notification so the backfill re-reads it.
+        self.flush_pending().await;
+        let persisted = match self.storage.load_session(&self.info).await {
+            Ok(persisted) => persisted,
+            Err(error) => {
+                tracing::warn!(%error, "writeback upgrade: failed to load session for backfill");
+                return;
+            }
+        };
+        let remote_sync = match init_remote_sync(
+            &persisted.summary,
+            StorageMode::Writeback,
+            Some(auth_manager),
+        ) {
+            Ok(Some(remote_sync)) => remote_sync,
+            // ZDR team, or nothing to do: leave the session local-only.
+            Ok(None) => return,
+            Err(error) => {
+                tracing::warn!(%error, "writeback upgrade: remote sync init failed");
+                return;
+            }
+        };
+        // Fresh-only backfill; see `backfill_updates_to_sync`.
+        let backfilled =
+            backfill_updates_to_sync(self.created_fresh, persisted.updates, &remote_sync);
+        if self.created_fresh {
+            tracing::info!(
+                session_id = %self.info.id,
+                backfilled,
+                "writeback enabled after settings arrival; backfilled local-only history",
+            );
+        } else {
+            tracing::info!(
+                session_id = %self.info.id,
+                "writeback enabled for resumed session; forward-only, no backfill",
+            );
+        }
+        self.remote_sync = Some(remote_sync);
+    }
+
     fn finish_pending_append(
         notification: acp::SessionNotification,
         result: Result<(), crate::session::storage::AppendUpdateError>,
@@ -1782,6 +1880,9 @@ impl SessionPersistence {
                 spawn_worktree_touch(&self.info);
             }
             match msg {
+                PersistenceMsg::UpgradeToWriteback { auth_manager } => {
+                    self.upgrade_to_writeback(auth_manager).await;
+                }
                 PersistenceMsg::Flush => {
                     self.flush_pending().await;
                 }
@@ -2215,6 +2316,29 @@ fn collect_session_files_recursive(base: &Path, dir: &Path, files: &mut Vec<Copi
     }
 }
 
+/// Queue a fresh session's local-only ACP history to `remote_sync` (xAI updates
+/// are never synced), returning the count. Resumed sessions are forward-only:
+/// their prior history may already be on the backend (which appends by content,
+/// no per-message id), so re-sending would duplicate.
+fn backfill_updates_to_sync(
+    created_fresh: bool,
+    updates: Vec<SessionUpdate>,
+    remote_sync: &RemoteSync,
+) -> usize {
+    if !created_fresh {
+        return 0;
+    }
+    let mut backfilled = 0usize;
+    for update in updates {
+        if let SessionUpdate::Acp(notification) = update {
+            remote_sync.queue(*notification);
+            backfilled += 1;
+        }
+    }
+    remote_sync.flush();
+    backfilled
+}
+
 fn init_remote_sync(
     summary: &Summary,
     storage_mode: StorageMode,
@@ -2391,16 +2515,11 @@ pub(crate) async fn new(
         summary.current_model_id = model_id;
     }
 
-    let (tx, rx) = mpsc::unbounded_channel::<PersistenceMsg>();
+    let (handle, rx, summary_tx) = actor_channel();
 
     let info_clone = info.clone();
     let storage: Arc<dyn StorageAdapter> = Arc::from(storage);
     let remote_sync = init_remote_sync(&summary, storage_mode, auth_manager)?;
-    let handle = PersistenceHandle {
-        tx: tx.clone(),
-        noop: false,
-    };
-
     tokio::task::spawn(async move {
         let persistence = SessionPersistence {
             info: info_clone,
@@ -2408,12 +2527,13 @@ pub(crate) async fn new(
             pending_notification: None,
             rx,
             remote_sync: remote_sync.clone(),
+            created_fresh: true,
             relay_sync,
             summary: crate::session::summary::SummaryGenerator::new(
                 crate::session::summary::SummaryConfig {
                     sampling_client,
                     model: session_summary_model,
-                    persistence_tx: tx,
+                    persistence_tx: summary_tx,
                 },
             ),
             registry_title_sync,
@@ -2436,7 +2556,7 @@ pub(crate) async fn new(
 /// - Skips remote sync (subagent sessions are not synced to cloud).
 /// - Skips relay sync (subagent sessions are not shared).
 /// - Skips gateway (lifecycle notifications are handled by the coordinator).
-pub async fn new_with_explicit_dir(
+pub(crate) async fn new_with_explicit_dir(
     info: &Info,
     target_dir: PathBuf,
     model_id: acp::ModelId,
@@ -2462,15 +2582,10 @@ pub async fn new_with_explicit_dir(
         summary.current_model_id = model_id;
     }
 
-    let (tx, rx) = mpsc::unbounded_channel::<PersistenceMsg>();
+    let (handle, rx, summary_tx) = actor_channel();
 
     let info_clone = info.clone();
     let storage: Arc<dyn StorageAdapter> = Arc::from(storage);
-    let handle = PersistenceHandle {
-        tx: tx.clone(),
-        noop: false,
-    };
-
     tokio::task::spawn(async move {
         let persistence = SessionPersistence {
             info: info_clone,
@@ -2478,12 +2593,13 @@ pub async fn new_with_explicit_dir(
             pending_notification: None,
             rx,
             remote_sync: None,
+            created_fresh: false,
             relay_sync: None,
             summary: crate::session::summary::SummaryGenerator::new(
                 crate::session::summary::SummaryConfig {
                     sampling_client,
                     model: session_summary_model,
-                    persistence_tx: tx,
+                    persistence_tx: summary_tx,
                 },
             ),
             registry_title_sync: None,
@@ -2579,22 +2695,18 @@ pub(crate) async fn load(
         workflow_runs: persisted.workflow_runs,
     };
 
-    let (tx, rx) = mpsc::unbounded_channel::<PersistenceMsg>();
+    let (handle, rx, summary_tx) = actor_channel();
 
     let storage: Arc<dyn StorageAdapter> = Arc::from(storage);
     let remote_sync = init_remote_sync(&persisted_info.summary, storage_mode, auth_manager)?;
 
     let has_title = !persisted_info.summary.display_title().is_empty();
-    let handle = PersistenceHandle {
-        tx: tx.clone(),
-        noop: false,
-    };
     tokio::task::spawn(async move {
         let mut summary_gen = crate::session::summary::SummaryGenerator::new(
             crate::session::summary::SummaryConfig {
                 sampling_client,
                 model: session_summary_model,
-                persistence_tx: tx,
+                persistence_tx: summary_tx,
             },
         );
         if has_title {
@@ -2606,6 +2718,7 @@ pub(crate) async fn load(
             pending_notification: None,
             rx,
             remote_sync: remote_sync.clone(),
+            created_fresh: false,
             relay_sync,
             summary: summary_gen,
             registry_title_sync,
@@ -2665,22 +2778,18 @@ pub(crate) async fn load_light(
         workflow_runs: persisted.workflow_runs,
     };
 
-    let (tx, rx) = mpsc::unbounded_channel::<PersistenceMsg>();
+    let (handle, rx, summary_tx) = actor_channel();
 
     let storage: Arc<dyn StorageAdapter> = Arc::from(storage);
     let remote_sync = init_remote_sync(&persisted_info.summary, storage_mode, auth_manager)?;
 
     let has_title = !persisted_info.summary.display_title().is_empty();
-    let handle = PersistenceHandle {
-        tx: tx.clone(),
-        noop: false,
-    };
     tokio::task::spawn(async move {
         let mut summary_gen = crate::session::summary::SummaryGenerator::new(
             crate::session::summary::SummaryConfig {
                 sampling_client,
                 model: session_summary_model,
-                persistence_tx: tx,
+                persistence_tx: summary_tx,
             },
         );
         if has_title {
@@ -2692,6 +2801,7 @@ pub(crate) async fn load_light(
             pending_notification: None,
             rx,
             remote_sync: remote_sync.clone(),
+            created_fresh: false,
             relay_sync,
             summary: summary_gen,
             registry_title_sync,
@@ -2944,7 +3054,7 @@ const DEFAULT_CLEANUP_TTL_DAYS: u32 = 30;
 /// This is a **synchronous** function intended to be called via
 /// `tokio::task::spawn_blocking` so it runs on the thread pool and
 /// never competes with the agent's single-threaded `LocalSet`.
-pub fn cleanup_stale_sessions(skip_session_dir: Option<&Path>) {
+pub(crate) fn cleanup_stale_sessions(skip_session_dir: Option<&Path>) {
     CLEANUP_SESSIONS_ONCE.call_once(|| {
         let ttl_days = resolve_cleanup_ttl_days();
         let root = grok_home();
@@ -4500,6 +4610,27 @@ mod repo_wide_resolution_tests {
         assert_eq!(
             deser.resolution_kind,
             LocalSessionResolutionKind::SameRepoDifferentCwd
+        );
+    }
+}
+
+#[cfg(test)]
+mod actor_lifetime_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn dropping_the_session_handle_closes_the_actor_channel() {
+        let (handle, mut rx, summary_tx) = actor_channel();
+
+        drop(handle);
+
+        assert!(
+            summary_tx.upgrade().is_none(),
+            "the generator's sender must not keep the channel open"
+        );
+        assert!(
+            rx.recv().await.is_none(),
+            "the actor's receive loop must end once the session drops its handle"
         );
     }
 }

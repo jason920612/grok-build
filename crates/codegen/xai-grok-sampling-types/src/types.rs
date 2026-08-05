@@ -1027,6 +1027,18 @@ impl ApiBackend {
     pub fn supports_native_schema(&self) -> bool {
         matches!(self, Self::ChatCompletions | Self::Responses)
     }
+
+    /// Whether replayed reasoning must be stripped. Only the Messages API rejects thinking blocks sent without a top-level `thinking` config.
+    pub fn requires_reasoning_strip(&self) -> bool {
+        matches!(self, Self::Messages)
+    }
+
+    /// Whether [`ConversationRequest::prompt_cache_key`] reaches the wire. Only the Responses mapping sends it, so a key set elsewhere is inert.
+    ///
+    /// [`ConversationRequest::prompt_cache_key`]: crate::conversation::ConversationRequest::prompt_cache_key
+    pub fn forwards_prompt_cache_key(&self) -> bool {
+        matches!(self, Self::Responses)
+    }
 }
 
 /// Sampling client configuration (API key excluded — that stays in the client).
@@ -1043,6 +1055,13 @@ pub struct SamplingConfig {
     /// Extra headers to send with requests (e.g., for BYOK scenarios).
     #[serde(default, skip_serializing_if = "indexmap::IndexMap::is_empty")]
     pub extra_headers: indexmap::IndexMap<String, String>,
+    /// Query parameters folded into every request URL (percent-encoded).
+    #[serde(default, skip_serializing_if = "indexmap::IndexMap::is_empty")]
+    pub query_params: indexmap::IndexMap<String, String>,
+    /// Header name to environment variable; only the mapping persists, not the
+    /// resolved secret.
+    #[serde(default, skip_serializing_if = "indexmap::IndexMap::is_empty")]
+    pub env_http_headers: indexmap::IndexMap<String, String>,
     /// Total context window size in tokens. Used for auto-compact thresholds.
     pub context_window: NonZeroU64,
     /// Reasoning effort level for reasoning models.

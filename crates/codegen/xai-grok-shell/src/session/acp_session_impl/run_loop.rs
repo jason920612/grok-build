@@ -410,7 +410,7 @@ pub(super) async fn run_session(
                     if let Some(notification) = replay_buffer.flush() {
                         session.emit_buffered(notification).await;
                     }
-                    let (turn_succeeded, infra_pause_message) =
+                    let (turn_succeeded, suppress_goal_continuation, infra_pause_message) =
                         SessionActor::post_turn_goal_degradation_plan(&result);
                     session.handle_completion(prompt_id, result).await;
                     // Drain any monitor events that were routed to the mid-turn buffer
@@ -421,7 +421,9 @@ pub(super) async fn run_session(
                     }
                     // Goal continuation (success) or back-off (non-success).
                     // Owns the streak-tracking and reminder-injection path.
-                    session.handle_turn_end(turn_succeeded).await;
+                    session
+                        .handle_turn_end(turn_succeeded, suppress_goal_continuation)
+                        .await;
                     // Interjections that raced past the turn's final drain
                     // (arrived during turn-end bookkeeping) have no turn left
                     // to merge into — convert them to front-of-queue prompt
@@ -887,7 +889,7 @@ pub(super) async fn run_session(
                                     // Cap to prevent unbounded growth during long tool calls.
                                     const MAX_BUFFER_EVENTS: usize = 50;
                                     buffer.push_capped(
-                                        xai_grok_tools::implementations::grok_build::task::types::MonitorEventNotification {
+                                        xai_grok_tools::implementations::grok_build::monitor::types::MonitorEventNotification {
                                             task_id: task_id.clone(),
                                             event_text,
                                             // Tag with this session's id so the
@@ -954,12 +956,7 @@ pub(super) async fn run_session(
                             }
                             SessionActor::maybe_start_running_task(session.clone(), completion_tx.clone()).await;
                         }
-                        SessionCommand::Cancel {
-                            cancel_subagents,
-                            kill_background_tasks,
-                            rewind_if_pristine,
-                            trigger,
-                        } => {
+                        SessionCommand::Cancel(options) => {
                             // Flush the actor-owned replay buffer before tearing
                             // down the running turn so any streamed chunks
                             // (notably AgentThoughtChunk reasoning text) still
@@ -975,15 +972,9 @@ pub(super) async fn run_session(
                             // Clear pending interjections — the turn is being
                             // cancelled, so they have no active turn to inject into.
                             session.pending_interjections.clear();
-                            let suppress_task_wakes = trigger.as_deref() == Some("ctrl_c");
-                            session
-                                .cancel_running_task(
-                                    cancel_subagents,
-                                    kill_background_tasks,
-                                    rewind_if_pristine,
-                                    trigger,
-                                )
-                                .await;
+                            let suppress_task_wakes =
+                                matches!(options.trigger, Some(crate::session::CancelTrigger::CtrlC));
+                            session.cancel_running_task(options).await;
 
                             // Auto-pause active goal on Ctrl+C so timers stop
                             // and the pager shows "paused" instead of "active".
@@ -1444,11 +1435,16 @@ pub(super) async fn run_session(
 
                             let session_for_mcp = session.clone();
                             let sname = server_name.clone();
+                            let session_cwd = session.session_info.cwd.clone();
                             tokio::task::spawn_local(async move {
                                 session_for_mcp.ensure_mcp_tools_initialized().await;
-                                if let Err(e) = crate::util::config::save_mcp_server_enabled(
-                                    &sname, enabled,
-                                ).await {
+                                if let Err(e) = crate::util::config::save_mcp_server_enabled_in(
+                                    &sname,
+                                    enabled,
+                                    std::path::Path::new(&session_cwd),
+                                )
+                                .await
+                                {
                                     tracing::warn!(
                                         server = sname.as_str(),
                                         error = %e,
@@ -1776,8 +1772,7 @@ pub(super) async fn run_session(
                                 .send((availability.workflows, availability.workflow_management));
                         }
                         SessionCommand::ListAvailableCommands { respond_to } => {
-                            let bridge = session.agent.borrow().tool_bridge().clone();
-                            let skills = bridge.slash_skills().await;
+                            let skills = session.slash_skills_for_resolve().await;
                             let tool_names = session.registered_tool_names().await;
                             let has_runs = !session.workflow_tracker().await.lock().list().is_empty();
                             let availability =
@@ -2091,7 +2086,7 @@ pub(super) async fn run_session(
                                 PersistenceMsg::GitHead { commit, branch },
                             );
                         }
-                        SessionCommand::Shutdown => {
+                        SessionCommand::Shutdown(kind) => {
                             shutdown_workflows(&session).await;
                             // Flush the actor-owned replay buffer so any
                             // streamed chunks still pending at shutdown
@@ -2103,6 +2098,19 @@ pub(super) async fn run_session(
                             // Cancel, CopyFile, and FlushComplete arms.
                             if let Some(notification) = replay_buffer.flush() {
                                 session.emit_buffered(notification).await;
+                            }
+                            // This arm returns; an unanswered turn would race
+                            // teardown and report `EndTurn` for unfinished work.
+                            if kind == crate::session::ShutdownKind::CancelRunningTurn {
+                                session
+                                    .cancel_running_task(crate::session::CancelOptions {
+                                        cancel_subagents: true,
+                                        kill_background_tasks: true,
+                                        rewind_if_no_output: false,
+                                        trigger: Some(crate::session::CancelTrigger::Shutdown),
+                                        user_initiated: false,
+                                    })
+                                    .await;
                             }
                             // Drop any queued synthetic auto-wake prompts and pending
                             // notifications before running hooks. Without this, a

@@ -151,10 +151,15 @@ pub fn spawn_incubation(
         fork_context: false,
         owner: crate::implementations::grok_build::task::types::SubagentOwner::Task,
         cancel_token: tokio_util::sync::CancellationToken::new(),
+    };
+    // Upstream split the result channel out of the request itself into the
+    // `SubagentSpawnRequest` envelope.
+    let spawn = crate::implementations::grok_build::task::types::SubagentSpawnRequest {
+        request: Box::new(request),
         result_tx,
     };
     if event_tx
-        .send(SubagentEvent::Spawn(Box::new(request)))
+        .send(SubagentEvent::Spawn(spawn))
         .is_err()
     {
         tracing::debug!("incubation: subagent coordinator channel closed; skipping");

@@ -121,6 +121,7 @@ async fn test_agent_from_config(
         session_env: std::sync::Arc::new(std::collections::HashMap::new()),
         notification_handle: ToolNotificationHandle::noop(),
         owner_session_id: None,
+        subagent: None,
         parent_scheduler_handle: None,
         skills: vec![],
         state_path: std::path::PathBuf::from("/tmp/tool_state.json"),
@@ -219,6 +220,8 @@ pub(crate) async fn create_test_actor_ex(
             top_p: None,
             api_backend: Default::default(),
             extra_headers: Default::default(),
+            query_params: Default::default(),
+            env_http_headers: Default::default(),
             context_window: std::num::NonZeroU64::new(context_window)
                 .expect("test context_window must be non-zero"),
             reasoning_effort: None,
@@ -238,6 +241,7 @@ pub(crate) async fn create_test_actor_ex(
         model_auth_memo: std::cell::RefCell::new(None),
         attribution_callback: None,
         auth_manager: None,
+        is_chat_kind: false,
         state,
         notifications: NotificationSender {
             gateway: GatewaySender::new(gateway_tx),
@@ -279,6 +283,7 @@ pub(crate) async fn create_test_actor_ex(
             tool_choice: crate::util::config::CompactionToolChoice::Auto,
             prefire: crate::session::compaction_config::PrefireState::default(),
             prefix_released: std::sync::atomic::AtomicBool::new(false),
+            cancel: Default::default(),
         },
         memory: crate::session::memory_state::SessionMemory {
             flush_config: crate::config::MemoryFlushConfig::default(),
@@ -595,19 +600,5 @@ pub(crate) fn assert_goal_discipline_in_reminder(reminder: &str, site: &str) {
     assert!(
         !reminder.contains("{DISCIPLINE_BLOCK}"),
         "{site} must not leave {{DISCIPLINE_BLOCK}} unsubstituted:\n{reminder}"
-    );
-}
-#[cfg(test)]
-pub(crate) fn assert_resume_recap_discipline_tracking_order(text: &str, recap_marker: &str) {
-    let recap_idx = text.find(recap_marker).unwrap_or_else(|| {
-        panic!("resume reminder must include block recap `{recap_marker}`:\n{text}");
-    });
-    assert_goal_discipline_in_reminder(text, "goal_resume");
-    let discipline_idx = text
-        .find("<task_completion_discipline>")
-        .expect("resume reminder must include discipline block");
-    assert!(
-        recap_idx < discipline_idx,
-        "resume reminder must place recap before discipline (recap={recap_idx} discipline={discipline_idx}):\n{text}"
     );
 }

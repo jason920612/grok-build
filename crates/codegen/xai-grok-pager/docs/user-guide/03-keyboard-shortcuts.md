@@ -93,9 +93,31 @@ Switch between the prompt input and scrollback pane.
 |-----|---------|---------|--------|
 | `Tab` | `Space` (and `i` in vim mode) | Scrollback focused | Focus the prompt input |
 | `Tab` | | Prompt focused | Focus the scrollback (both simple and vim scrollback modes) |
+| `Tab` | `Shift+Tab` (backwards) | Question card focused | Walk the card's answers, wrapping round at the ends. Focus stays in the card |
 | `Enter` | | Prompt focused | Send the current prompt |
 
 **Esc is not a focus key.** It follows the cancel / clear / rewind semantics below. The mid-turn cancel is the only branch gated on `[ui].vim_mode` (scrollback nav); nothing depends on `[ui].simple_mode` (prompt editor). Overlays, modals, slash/file dropdowns, voice, search, and selection still steal Esc first.
+
+## Question card (`ask_user_question`)
+
+While the agent is waiting on an answer, the card owns the keyboard.
+
+| Key | Action |
+|-----|--------|
+| `↑` / `↓`, `j` / `k` | Move between answers (clamped at the ends) |
+| `Tab` / `Shift+Tab` | Walk the answers in a loop: every answer of this question, then the next question's, and off the last answer back to the first |
+| `←` / `→`, `h` / `l`, `[` / `]` | Previous / next question |
+| `1`–`9`, `a`–`f` | Pick that answer directly |
+| `z` | Jump to the free-text row and start typing |
+| `Space` | Toggle the focused answer (multi-select), or start typing on the free-text row |
+| `Enter` | Select and advance, submit on the last question, or edit the free-text row |
+| `Esc` | Unselect this question's answer. It does not move focus |
+| `y` | Copy the focused answer |
+| `Shift+X` | Dismiss the question (the agent continues without an answer) |
+| `Ctrl+F` | Fullscreen the card |
+
+While typing a free-text answer, `Enter` submits and `Esc` returns to the
+answer rows; every other key goes to the text field.
 
 ## Escape
 
@@ -212,6 +234,7 @@ Actions available from any screen.
 | Key | Alt Key | Action | Confirmation |
 |-----|---------|--------|-------------|
 | `Ctrl+N` | | Create a new session (optionally in a git worktree) | Yes (double-press within 1000ms) |
+| `Ctrl+\` | | Open or toggle the [Agent Dashboard](23-dashboard.md) | No |
 | `Ctrl+Q` | `Ctrl+D` | Quit the application | Yes (double-press within 1000ms) |
 
 **VS Code family terminal** (VS Code, Cursor, Windsurf, Zed integrated terminals): `Ctrl+Q` is captured by the host, so Grok makes **`Ctrl+D` the sole quit key** (`Ctrl+Q` is not bound). Half-page-down is rebound to bare **`Shift+D`**. Mid-turn interject uses **`Ctrl+L`** (no alternates) because `Ctrl+Enter` / `Ctrl+I` do not reliably reach the PTY; extensions are opened via `/plugins` instead of `Ctrl+L`.
@@ -236,6 +259,30 @@ Bindings that only fire on the welcome screen (before any agent session is open)
 | `Ctrl+Shift+I` | Dismiss the Claude import row (when available) |
 
 `Ctrl+W`, `Ctrl+I`, and `Ctrl+Shift+I` are only active on the welcome screen. `Ctrl+S` opens the session picker on both the welcome screen and inside an agent session (where it opens as a modal overlay, same as the `/resume` command). `Ctrl+Q` is the same global Quit binding documented above, not a welcome-specific handler.
+
+---
+
+## Agent Dashboard
+
+Bindings while the [Agent Dashboard](23-dashboard.md) is focused (`Ctrl+\` or `/dashboard`).
+
+| Key | Action |
+|-----|--------|
+| `↑` / `↓`, `j` / `k` | Navigate agent rows (selecting a row opens peek) |
+| `Enter` | Open the selected agent, or send a typed peek reply / dispatch prompt |
+| `Ctrl+S` | Reply or dispatch **and** attach to that agent |
+| `Ctrl+/` | Toggle search / filter mode |
+| `Ctrl+R` | Rename the selected agent |
+| `Ctrl+T` | Pin / unpin |
+| `Ctrl+G` | Toggle grouping (state ↔ working directory) |
+| `Ctrl+X` | Cancel a running turn, or press twice within 2s to permanently delete |
+| `Ctrl+O` | Toggle always-approve on the selected agent |
+| `Tab` | Toggle focus between the list and the dispatch / peek input |
+| `Esc` | Step back (cancel search → close peek → clear filter → unfocus → unselect → exit) |
+| `Ctrl+\` | Exit the dashboard (or return from an attached agent) |
+| `Ctrl+.` (alt: `?`) | Shortcuts cheatsheet |
+
+Details (peek vs dispatch, search prefixes, persistence): [Agent Dashboard](23-dashboard.md).
 
 ---
 
