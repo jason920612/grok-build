@@ -130,7 +130,7 @@ pub fn grok_binary() -> PathBuf {
         return std::path::absolute(&p).unwrap_or(p);
     }
 
-    if let Ok(path) = std::env::var("CARGO_BIN_EXE_xai-grok-pager") {
+    if let Ok(path) = std::env::var("CARGO_BIN_EXE_groktool") {
         let p = PathBuf::from(path);
         if p.exists() {
             return p;

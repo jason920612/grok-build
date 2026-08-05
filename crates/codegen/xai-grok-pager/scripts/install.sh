@@ -2,6 +2,16 @@
 #
 # Grok CLI installer — https://x.ai/cli/install.sh
 #
+# NOT THE INSTALLER FOR THIS FORK. This is upstream's script: it downloads the
+# official `grok` binary from x.ai into ~/.grok, which is a different product
+# from the `groktool` build in this repository and shares none of its state.
+# Running it will not install this fork, and it will not upgrade one either.
+#
+# To install this fork:
+#   cargo build --release -p xai-grok-pager-bin
+#   cp target/release/groktool ~/.groktool/bin/groktool   # .exe on Windows
+# and put ~/.groktool/bin on PATH.
+#
 # Auth: GROK_DEPLOYMENT_KEY (takes precedence) or ~/.grok/auth.json from `grok login`.
 # Env: GROK_CHANNEL (stable|alpha|enterprise, default: stable), GROK_BIN_DIR, GROK_PROXY_URL
 #
